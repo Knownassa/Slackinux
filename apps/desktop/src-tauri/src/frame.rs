@@ -235,21 +235,37 @@ fn dump_widget_tree(widget: &gtk::Widget, depth: usize, out: &mut Vec<String>) {
     }
 }
 
-/// A thin titlebar: app menubar on the left, window controls on the right.
+/// A compact titlebar: app menubar on the left, title in the center, and
+/// familiar window controls on the right.
 fn build_titlebar(win: &gtk::Window, app: &tauri::AppHandle) -> gtk::HeaderBar {
     let header = gtk::HeaderBar::new();
     header.set_show_close_button(false);
     header.set_has_subtitle(false);
     header.set_decoration_layout(Some(":"));
-    header.set_title(Some("Slackinux"));
     header.style_context().add_class("rounded");
     header.style_context().add_class("titlebar");
+
+    let title = gtk::Label::new(Some("Slackinux"));
+    title.style_context().add_class("app-title");
+    header.set_custom_title(Some(&title));
 
     let minimize =
         gtk::Button::from_icon_name(Some("window-minimize-symbolic"), gtk::IconSize::Button);
     let maximize =
         gtk::Button::from_icon_name(Some("window-maximize-symbolic"), gtk::IconSize::Button);
     let close = gtk::Button::from_icon_name(Some("window-close-symbolic"), gtk::IconSize::Button);
+
+    for button in [&minimize, &maximize, &close] {
+        button.set_relief(gtk::ReliefStyle::None);
+        button.set_focus_on_click(false);
+        button.style_context().add_class("window-control");
+    }
+    minimize.style_context().add_class("minimize");
+    maximize.style_context().add_class("maximize");
+    close.style_context().add_class("close");
+    minimize.set_tooltip_text(Some("Minimize"));
+    maximize.set_tooltip_text(Some("Maximize"));
+    close.set_tooltip_text(Some("Close to tray"));
 
     let win_min = win.clone();
     minimize.connect_clicked(move |_| {
@@ -264,6 +280,23 @@ fn build_titlebar(win: &gtk::Window, app: &tauri::AppHandle) -> gtk::HeaderBar {
         } else {
             win_max.maximize();
         }
+    });
+
+    // Keep the middle control recognizable after maximizing the window.
+    let maximize_state = maximize.clone();
+    win.connect_window_state_event(move |_, event| {
+        let maximized = event
+            .new_window_state()
+            .contains(gdk::WindowState::MAXIMIZED);
+        let icon = if maximized {
+            "window-restore-symbolic"
+        } else {
+            "window-maximize-symbolic"
+        };
+        let image = gtk::Image::from_icon_name(Some(icon), gtk::IconSize::Button);
+        maximize_state.set_image(Some(&image));
+        maximize_state.set_tooltip_text(Some(if maximized { "Restore" } else { "Maximize" }));
+        Propagation::Proceed
     });
 
     let win_close = win.clone();
@@ -328,6 +361,14 @@ fn setup_drag(header: &gtk::HeaderBar, win: &gtk::Window) {
                 }
                 let is_window = t == *w.upcast_ref::<gtk::Widget>();
                 target = if is_window { None } else { t.parent() };
+            }
+            if event.event_type() == gdk::EventType::DoubleButtonPress {
+                if win_drag.is_maximized() {
+                    win_drag.unmaximize();
+                } else {
+                    win_drag.maximize();
+                }
+                return Propagation::Stop;
             }
             let (root_x, root_y) = event.root();
             win_drag.begin_move_drag(1, root_x as i32, root_y as i32, event.time());
@@ -402,7 +443,12 @@ fn apply_chrome_css(win: &gtk::Window, provider: &gtk::CssProvider, dark: bool) 
 
 fn chrome_css(dark: bool) -> String {
     let card_bg = if dark { "#1d1c1d" } else { "#f6f7f8" };
-    let fg = if dark { "#e8eaed" } else { "#1f2328" };
+    let chrome_bg = if dark { "#242126" } else { "#ffffff" };
+    let fg = if dark { "#f1eef1" } else { "#29252b" };
+    let muted_fg = if dark { "#c9c3ca" } else { "#5f5661" };
+    let border = if dark { "#3a363c" } else { "#ddd8de" };
+    let hover = if dark { "#38323a" } else { "#f0ebf1" };
+    let active = if dark { "#4a414c" } else { "#e5dce7" };
     format!(
         r#"
 window, window.csd {{
@@ -418,22 +464,23 @@ box.card.rounded {{
   border-radius: 12px;
 }}
 headerbar.titlebar {{
-  min-height: 22px;
-  font-size: 11px;
+  min-height: 32px;
+  font-size: 12px;
   padding-top: 0;
   padding-bottom: 0;
+  padding-left: 4px;
+  padding-right: 4px;
   margin: 0;
   background-image: none;
-  background-color: {card_bg};
+  background-color: {chrome_bg};
   color: {fg};
   border-image: none;
   box-shadow: none;
-  border-bottom: 1px solid alpha(black, 0.1);
+  border-bottom: 1px solid {border};
 }}
-headerbar.titlebar label.title,
-label.title,
-label.subtitle {{
-  font-size: 10px;
+headerbar.titlebar label.app-title {{
+  font-size: 12px;
+  font-weight: 600;
   padding: 0;
   margin: 0;
   min-height: 0;
@@ -441,37 +488,55 @@ label.subtitle {{
   color: {fg};
 }}
 headerbar.titlebar menubar {{
-  font-size: 11px;
+  font-size: 12px;
   padding: 0;
   margin: 0;
+  background: transparent;
+  background-image: none;
   color: {fg};
 }}
 headerbar.titlebar menubar > menuitem {{
-  font-size: 11px;
-  padding: 1px 6px;
+  min-height: 24px;
+  font-size: 12px;
+  padding: 0 7px;
+  margin: 3px 1px;
+  border-radius: 5px;
+  background: transparent;
+  background-image: none;
+  color: {muted_fg};
+}}
+headerbar.titlebar menubar > menuitem:hover,
+headerbar.titlebar menubar > menuitem:active {{
+  background-color: {hover};
   color: {fg};
 }}
-headerbar.titlebar button {{
-  min-height: 18px;
-  min-width: 24px;
-  padding: 0 4px;
-  margin: 0 1px;
+headerbar.titlebar button.window-control {{
+  min-height: 28px;
+  min-width: 36px;
+  padding: 0;
+  margin: 2px 0;
   border: none;
-  border-radius: 6px;
+  border-radius: 5px;
   background: transparent;
   background-image: none;
   box-shadow: none;
+  color: {muted_fg};
+}}
+headerbar.titlebar button.window-control:hover {{
+  background-color: {hover};
   color: {fg};
 }}
-headerbar.titlebar button:hover {{
-  background-color: alpha(currentColor, 0.12);
+headerbar.titlebar button.window-control:active {{
+  background-color: {active};
 }}
-headerbar.titlebar button:active {{
-  background-color: alpha(currentColor, 0.2);
-}}
-headerbar.titlebar button.titlebutton.close:hover {{
-  background-color: #e81123;
+headerbar.titlebar button.window-control.close:hover {{
+  background-color: #d92d3a;
   color: white;
+}}
+window:backdrop headerbar.titlebar label.app-title,
+window:backdrop headerbar.titlebar menubar,
+window:backdrop headerbar.titlebar button.window-control {{
+  opacity: 0.72;
 }}
 headerbar.titlebar.rounded {{
   border-radius: 12px 12px 0 0;

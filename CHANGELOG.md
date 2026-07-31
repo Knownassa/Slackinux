@@ -9,6 +9,8 @@ All notable changes to Slackinux are documented here.
 - Added **Account → Check for Updates** with download, install, and restart.
 - Added a GitHub Actions workflow that creates signed Linux installers and
   the updater `latest.json` manifest from version tags.
+- Refined the custom top panel with clearer spacing, theme-aware menu states,
+  improved window controls, and double-click maximize/restore behavior.
 
 ## 0.1.0 - 2026-07-31
 
