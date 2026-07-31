@@ -2,6 +2,14 @@
 
 All notable changes to Slackinux are documented here.
 
+## 0.2.0 - 2026-07-31
+
+- Added signed update checks backed by GitHub Releases.
+- Added automatic update-available notifications after startup.
+- Added **Account → Check for Updates** with download, install, and restart.
+- Added a GitHub Actions workflow that creates signed Linux installers and
+  the updater `latest.json` manifest from version tags.
+
 ## 0.1.0 - 2026-07-31
 
 - Initial public Linux release.

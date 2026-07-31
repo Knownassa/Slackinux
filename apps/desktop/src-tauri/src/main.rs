@@ -9,6 +9,7 @@ mod navigation;
 mod notifications;
 mod renderer;
 mod settings;
+mod updater;
 
 use std::env;
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -59,6 +60,7 @@ fn main() -> AppResult<()> {
         }))
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir).ok();
@@ -235,6 +237,8 @@ fn main() -> AppResult<()> {
                 .build(app)?;
             let clear_cache = MenuItemBuilder::with_id("clear_cache", "Clear Cache & Restart")
                 .build(app)?;
+            let check_updates =
+                MenuItemBuilder::with_id("check_updates", "Check for Updates").build(app)?;
             let about = MenuItemBuilder::with_id("about", "About Slackinux").build(app)?;
             let win_minimize = MenuItemBuilder::with_id("win_minimize", "Minimize")
                 .accelerator("CmdOrCtrl+M")
@@ -310,6 +314,7 @@ fn main() -> AppResult<()> {
                 .item(&login_in_app)
                 .item(&login_browser)
                 .separator()
+                .item(&check_updates)
                 .item(&dnd_toggle)
                 .item(&clear_cache)
                 .build()?;
@@ -349,6 +354,8 @@ fn main() -> AppResult<()> {
             // --- Navigation ---
             info!("navigating to Slack URL");
             renderer.navigate(slack_url.as_str())?;
+
+            updater::schedule_startup_check(app.handle().clone());
 
             info!("webview created successfully");
             Ok(())
@@ -421,6 +428,9 @@ fn main() -> AppResult<()> {
                     if let Err(err) = open::that_detached("https://slack.com/signin") {
                         error!("failed to open Slack sign-in in browser: {err}");
                     }
+                }
+                "check_updates" => {
+                    updater::check_for_updates(app.clone(), true);
                 }
                 "dnd_toggle" => {
                     let state = app.state::<AppState>();
