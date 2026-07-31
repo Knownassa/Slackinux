@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Slackinux Compatibility Manifest",
+  "description": "Track Slack Web and WebKitGTK compatibility status",
+  "type": "object",
+  "properties": {
+    "schemaVersion": { "type": "integer", "minimum": 1 },
+    "updatedAt": { "type": "string", "format": "date" },
+    "slack": {
+      "type": "object",
+      "properties": {
+        "minimumChromeMajor": { "type": "integer" },
+        "minimumFirefoxMajor": { "type": "integer" },
+        "huddleBrowsers": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "renderers": {
+      "type": "object",
+      "properties": {
+        "webkitgtk": {
+          "type": "object",
+          "properties": {
+            "status": { "type": "string", "enum": ["supported", "experimental", "unsupported"] },
+            "messaging": { "type": "string", "enum": ["supported", "experimental", "unsupported"] },
+            "huddles": { "type": "string", "enum": ["supported", "experimental", "unsupported"] }
+          }
+        },
+        "cef": {
+          "type": "object",
+          "properties": {
+            "status": { "type": "string", "enum": ["supported", "experimental", "unsupported"] }
+          }
+        }
+      }
+    }
+  }
+}

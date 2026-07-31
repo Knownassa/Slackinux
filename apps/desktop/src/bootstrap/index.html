@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Slackinux</title>
+    <link rel="stylesheet" href="./bootstrap.css" />
+  </head>
+  <body>
+    <div id="app">
+      <div id="loading-state">
+        <svg class="spinner" viewBox="0 0 24 24" width="48" height="48">
+          <circle
+            cx="12" cy="12" r="10"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-dasharray="31.4 31.4"
+            stroke-linecap="round"
+          />
+        </svg>
+        <h1>Slackinux</h1>
+        <p>Loading Slack…</p>
+      </div>
+      <div id="error-state" style="display: none">
+        <h1>Could not load Slack</h1>
+        <p id="error-message"></p>
+      </div>
+    </div>
+    <script type="module" src="./bootstrap.ts"></script>
+  </body>
+</html>

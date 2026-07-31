@@ -1,0 +1,1 @@
+{"slack-remote":{"identifier":"slack-remote","description":"Capabilities for the Slack remote webview — intentionally empty to prevent any IPC access","local":true,"windows":["main"],"permissions":[]}}

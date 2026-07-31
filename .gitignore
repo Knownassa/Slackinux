@@ -1,0 +1,24 @@
+# Rust
+/target/
+
+# Node / frontend
+/node_modules/
+/apps/desktop/node_modules/
+/apps/desktop/dist/
+
+# Local release artifacts (published through GitHub Releases)
+/Slackinux_*.AppImage
+/Slackinux_*.deb
+
+# Editors and operating systems
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Local environment and logs
+.env
+.env.*
+!.env.example
+*.log
