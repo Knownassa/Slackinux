@@ -4,7 +4,7 @@
 
 ### Slack on Linux, without the Electron overhead
 
-<img src="branding/slackinux-color.png" alt="Slackinux logo" width="160">
+<img src="SlackinuxAppLogo.png" alt="Slackinux logo" width="160">
 
 An unofficial, resource-conscious desktop shell for Slack Web,<br>
 built with Rust, Tauri 2, and the system WebKitGTK renderer.
