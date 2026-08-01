@@ -80,3 +80,36 @@ jobs:
           args: "--bundles appimage,deb,rpm"
           uploadUpdaterJson: true
           uploadUpdaterSignatures: true
+
+      # tauri-action writes GitHub API asset URLs into latest.json. Those URLs
+      # can return 403 to unauthenticated desktop clients, so publish stable,
+      # public release-download URLs instead.
+      - name: Normalize updater download URLs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          release_dir="$(mktemp -d)"
+          gh release download "$GITHUB_REF_NAME" \
+            --pattern latest.json \
+            --dir "$release_dir"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" \
+            > "$release_dir/release.json"
+
+          base_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/"
+          jq \
+            --slurpfile release "$release_dir/release.json" \
+            --arg base_url "$base_url" \
+            '($release[0].assets | map({key: .url, value: .name}) | from_entries) as $names
+             | .platforms |= with_entries(.value.url = ($base_url + $names[.value.url]))' \
+            "$release_dir/latest.json" \
+            > "$release_dir/latest.fixed.json"
+          mv "$release_dir/latest.fixed.json" "$release_dir/latest.json"
+
+          jq -e \
+            --arg base_url "$base_url" \
+            'all(.platforms[]; .url | startswith($base_url))' \
+            "$release_dir/latest.json" \
+            > /dev/null
+          gh release upload "$GITHUB_REF_NAME" \
+            "$release_dir/latest.json" \
+            --clobber
