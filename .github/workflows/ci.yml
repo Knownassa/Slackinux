@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main]
   pull_request:
-    branches: [main, develop]
+    branches: [main]
 
 permissions:
   contents: read
@@ -35,6 +35,7 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf \
+            shellcheck \
             xdg-utils
 
       - name: Install frontend dependencies
@@ -59,3 +60,10 @@ jobs:
 
       - name: Check version consistency
         run: bash scripts/check-version-consistency.sh
+
+      - name: Check shell installer compatibility
+        run: |
+          sh -n install.sh
+          dash -n install.sh
+          bash -n install.sh
+          shellcheck install.sh

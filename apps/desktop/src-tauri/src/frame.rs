@@ -15,7 +15,20 @@ use gtk::glib::{Cast, Propagation};
 use gtk::prelude::*;
 use log::{debug, info, warn};
 
-pub fn apply_custom_frame(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
+use crate::settings::ThemePreference;
+
+thread_local! {
+    /// GTK objects are main-thread-bound; retain the one live provider here so
+    /// menu changes update the existing chrome instead of stacking providers.
+    static THEME_PROVIDER: std::cell::RefCell<Option<gtk::CssProvider>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub fn apply_custom_frame(
+    app: &tauri::AppHandle,
+    window: &tauri::WebviewWindow,
+    theme_preference: Arc<std::sync::Mutex<ThemePreference>>,
+) {
     let app = app.clone();
     let _ = window.with_webview(move |pw| {
         let webview = pw.inner();
@@ -100,7 +113,7 @@ pub fn apply_custom_frame(app: &tauri::AppHandle, window: &tauri::WebviewWindow)
         // Follow the system light/dark scheme for the chrome and the opaque
         // webview background.
         let chrome = gtk::CssProvider::new();
-        setup_system_theme(&webview, &win, &chrome);
+        setup_system_theme(&webview, &win, &chrome, theme_preference.clone());
 
         // Keep the chrome's corners square when maximized so the window fills
         // the screen edge to edge.
@@ -120,7 +133,11 @@ pub fn apply_custom_frame(app: &tauri::AppHandle, window: &tauri::WebviewWindow)
             Propagation::Proceed
         });
 
-        apply_chrome_css(&win, &chrome, detect_dark_system());
+        apply_chrome_css(
+            &win,
+            &chrome,
+            theme_is_dark(*theme_preference.lock().unwrap()),
+        );
 
         // Make the chrome follow the page, i.e. the Slack theme the user picked
         // in the app. After each finished load, probe the page's effective
@@ -129,11 +146,15 @@ pub fn apply_custom_frame(app: &tauri::AppHandle, window: &tauri::WebviewWindow)
         let probe_win = win.clone();
         let probe_chrome = chrome.clone();
         use webkit2gtk::WebViewExt;
+        let probe_preference = theme_preference.clone();
         webview.connect_load_changed(move |wv, event| {
             use javascriptcore::ValueExt;
             use webkit2gtk::gio::Cancellable;
             use webkit2gtk::LoadEvent;
             if event != LoadEvent::Finished {
+                return;
+            }
+            if *probe_preference.lock().unwrap() != ThemePreference::System {
                 return;
             }
             let wv2 = probe_wv.clone();
@@ -423,22 +444,23 @@ fn build_window_menu(win: &gtk::Window, app: &tauri::AppHandle, maximized: bool)
 /// Thin titlebar + rounded corners via CSS. The chrome (titlebar and the
 /// opaque card under the webview) is re-styled whenever the scheme flips.
 fn apply_chrome_css(win: &gtk::Window, provider: &gtk::CssProvider, dark: bool) {
-    use std::sync::atomic::AtomicBool;
-    use std::sync::atomic::Ordering;
-    static INSTALLED: AtomicBool = AtomicBool::new(false);
     let css = chrome_css(dark);
-    if let Err(e) = provider.load_from_data(css.as_bytes()) {
-        warn!("custom frame: css load failed: {e}");
-    }
-    if !INSTALLED.swap(true, Ordering::Relaxed) {
-        if let Some(screen) = gtk::prelude::WidgetExt::screen(win) {
-            gtk::StyleContext::add_provider_for_screen(
-                &screen,
-                provider,
-                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-            );
+    THEME_PROVIDER.with(|stored| {
+        let mut stored = stored.borrow_mut();
+        let active = stored.get_or_insert_with(|| {
+            if let Some(screen) = gtk::prelude::WidgetExt::screen(win) {
+                gtk::StyleContext::add_provider_for_screen(
+                    &screen,
+                    provider,
+                    gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+                );
+            }
+            provider.clone()
+        });
+        if let Err(e) = active.load_from_data(css.as_bytes()) {
+            warn!("custom frame: css load failed: {e}");
         }
-    }
+    });
 }
 
 fn chrome_css(dark: bool) -> String {
@@ -547,8 +569,13 @@ headerbar.titlebar.rounded {{
 
 // --- System light/dark theme ---
 
-fn setup_system_theme(webview: &webkit2gtk::WebView, win: &gtk::Window, chrome: &gtk::CssProvider) {
-    let dark = detect_dark_system();
+fn setup_system_theme(
+    webview: &webkit2gtk::WebView,
+    win: &gtk::Window,
+    chrome: &gtk::CssProvider,
+    preference: Arc<std::sync::Mutex<ThemePreference>>,
+) {
+    let dark = theme_is_dark(*preference.lock().unwrap());
     apply_theme(webview, win, chrome, dark);
     debug!(
         "custom frame: initial theme = {}",
@@ -564,6 +591,9 @@ fn setup_system_theme(webview: &webkit2gtk::WebView, win: &gtk::Window, chrome: 
             let settings = gtk::gio::Settings::new("org.gnome.desktop.interface");
             settings.connect_changed(None, move |s, key| {
                 if key == "color-scheme" || key == "gtk-theme" {
+                    if *preference.lock().unwrap() != ThemePreference::System {
+                        return;
+                    }
                     let dark = is_dark_from_settings(s);
                     debug!(
                         "custom frame: theme change -> {}",
@@ -574,6 +604,40 @@ fn setup_system_theme(webview: &webkit2gtk::WebView, win: &gtk::Window, chrome: 
             });
         }
     }
+}
+
+fn theme_is_dark(preference: ThemePreference) -> bool {
+    match preference {
+        ThemePreference::System => detect_dark_system(),
+        ThemePreference::Light => false,
+        ThemePreference::Dark => true,
+    }
+}
+
+/// Applies a menu-selected theme immediately to both Slack and native chrome.
+pub fn set_theme(window: &tauri::WebviewWindow, preference: ThemePreference) {
+    let tauri_theme = match preference {
+        ThemePreference::System => None,
+        ThemePreference::Light => Some(tauri::Theme::Light),
+        ThemePreference::Dark => Some(tauri::Theme::Dark),
+    };
+    if let Err(err) = window.set_theme(tauri_theme) {
+        warn!("theme: Tauri theme update failed: {err}");
+    }
+    let _ = window.with_webview(move |platform_webview| {
+        let webview = platform_webview.inner();
+        let Some(win) = webview
+            .toplevel()
+            .and_then(|widget| widget.downcast::<gtk::Window>().ok())
+        else {
+            warn!("theme: could not find the GTK window");
+            return;
+        };
+        let provider = gtk::CssProvider::new();
+        let dark = theme_is_dark(preference);
+        apply_theme(&webview, &win, &provider, dark);
+        info!("theme: applied {preference}");
+    });
 }
 
 fn detect_dark_system() -> bool {

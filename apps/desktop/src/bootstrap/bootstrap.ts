@@ -1,6 +1,7 @@
 const errorState = document.getElementById("error-state");
 const errorMessage = document.getElementById("error-message");
 const loadingState = document.getElementById("loading-state");
+const retryButton = document.getElementById("retry-button");
 
 function showError(msg: string) {
   if (loadingState) loadingState.style.display = "none";
@@ -26,3 +27,20 @@ document.addEventListener("visibilitychange", () => {
 
 // Expose showError globally so Rust can call it via eval() on failure.
 (window as unknown as Record<string, unknown>).showSlackinuxError = showError;
+
+retryButton?.addEventListener("click", () => {
+  window.location.href = "https://app.slack.com/signin";
+});
+
+const error = new URLSearchParams(window.location.search).get("error");
+if (error === "timeout") {
+  window.clearTimeout(navTimeout);
+  showError(
+    "Slack stayed blank while loading. Try again, or use Account → Sign In to Slack. Hardware acceleration has been placed in compatibility mode.",
+  );
+} else if (error === "load") {
+  window.clearTimeout(navTimeout);
+  showError(
+    "Slack could not load. Check your network, VPN, proxy, and system clock, then try again.",
+  );
+}
