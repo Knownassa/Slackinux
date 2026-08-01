@@ -2,15 +2,29 @@
 
 # Slackinux
 
-### An unofficial, resource-conscious Linux desktop shell for Slack Web
+### Slack on Linux, without the Electron overhead
 
-![Slackinux logo](branding/slackinux-color.png)
+<img src="branding/slackinux-color.png" alt="Slackinux logo" width="160">
+
+An unofficial, resource-conscious desktop shell for Slack Web,<br>
+built with Rust, Tauri 2, and the system WebKitGTK renderer.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/Knownassa/Slackinux)](https://github.com/Knownassa/Slackinux/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/Knownassa/Slackinux/total.svg)](https://github.com/Knownassa/Slackinux/releases)
 [![CI](https://github.com/Knownassa/Slackinux/actions/workflows/ci.yml/badge.svg)](https://github.com/Knownassa/Slackinux/actions/workflows/ci.yml)
 [![Built with Tauri 2](https://img.shields.io/badge/built%20with-Tauri%202-purple.svg)](https://v2.tauri.app)
-[![Platform](https://img.shields.io/badge/platform-Linux-lightgrey.svg)]()
+[![Rust](https://img.shields.io/badge/Rust-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![Platform](https://img.shields.io/badge/platform-Linux-FCC624?logo=linux&logoColor=black)](https://www.kernel.org/)
+[![GitHub stars](https://img.shields.io/github/stars/Knownassa/Slackinux?style=flat)](https://github.com/Knownassa/Slackinux/stargazers)
+
+[**Download**](https://github.com/Knownassa/Slackinux/releases/latest)
+· [**Features**](#highlights)
+· [**Build from source**](#build-from-source)
+· [**Security**](#security-model)
+· [**Report an issue**](https://github.com/Knownassa/Slackinux/issues/new)
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/G2G8G6CYN)
 
 </div>
 
@@ -20,6 +34,25 @@ reverse-engineered Slack APIs. Slack runs exactly as it does in your browser;
 Slackinux is the desktop shell around it.
 
 > **Not affiliated with or endorsed by Slack Technologies.**
+
+---
+
+## Why Slackinux?
+
+The official Slack desktop client bundles Chromium through Electron. Slackinux
+uses the WebKitGTK engine already available on Linux, while keeping the familiar
+Slack Web experience and adding desktop integration around it.
+
+| | Slackinux approach |
+|---|---|
+| **Renderer** | System WebKitGTK — no bundled browser engine |
+| **Desktop integration** | Tray, unread count, notifications, shortcuts, downloads, and custom window chrome |
+| **Updates** | Signed GitHub releases with in-app notification and verification |
+| **Security boundary** | Remote Slack content receives zero Tauri host capabilities |
+| **Distribution** | AppImage for portable use and `.deb` for Debian/Ubuntu |
+
+Slackinux does not reimplement Slack or use unofficial APIs. It provides a
+focused native Linux shell around the official web application.
 
 ---
 
@@ -227,8 +260,37 @@ with `scripts/check-version-consistency.sh` (also run in CI).
 
 ---
 
+## Contributing
+
+Contributions are welcome. Before making a larger change, open an
+[issue](https://github.com/Knownassa/Slackinux/issues) so the approach can be
+discussed. For code changes:
+
+1. Fork the repository and create a focused branch.
+2. Run `cargo fmt --all`, `cargo test --workspace`, and
+   `cargo clippy --workspace --all-targets -- -D warnings`.
+3. Open a pull request describing the user impact and how it was tested.
+
+Bug reports should include the Linux distribution, desktop environment,
+Wayland/X11 session, installation format, and relevant `RUST_LOG=debug` output.
+
+---
+
+## Support the project
+
+If Slackinux saves you time or system resources, you can support its continued
+development on [Ko-fi](https://ko-fi.com/G2G8G6CYN).
+
+Stars, bug reports, documentation fixes, and pull requests help too.
+
+---
+
 ## License
 
 Released under the [MIT License](LICENSE).
 
 Not affiliated with or endorsed by Slack Technologies.
+
+<div align="center">
+  <sub>Made for the Linux community with Rust, Tauri, and WebKitGTK.</sub>
+</div>
