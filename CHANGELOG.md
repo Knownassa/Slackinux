@@ -12,7 +12,8 @@ All notable changes to Slackinux are documented here.
   manager and development builds open the GitHub release instead.
 - Added a GitHub Actions CI workflow (fmt, clippy, tests, frontend build,
   version consistency) and a release workflow that creates signed Linux
-  installers and the updater `latest.json` manifest from version tags.
+  installers (AppImage, `.deb`, `.rpm`) and the updater `latest.json` manifest
+  from version tags.
 - Added `scripts/set-version.sh` and `scripts/check-version-consistency.sh` to
   keep `package.json`, `Cargo.toml`, and `tauri.conf.json` versions in sync.
 - Refined the custom top panel with clearer spacing, theme-aware menu states,

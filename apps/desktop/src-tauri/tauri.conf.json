@@ -17,7 +17,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["appimage", "deb"],
+    "targets": ["appimage", "deb", "rpm"],
     "createUpdaterArtifacts": true,
     "publisher": "Knownassa",
     "homepage": "https://github.com/Knownassa/Slackinux",
