@@ -13,10 +13,13 @@
 //! processes inherit the environment we set here).
 
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use log::{info, warn};
 
 use crate::settings::GpuPreference;
+
+static SOFTWARE_RENDERING: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Vendor {
@@ -45,6 +48,18 @@ enum Target {
 pub fn apply(pref: GpuPreference) {
     let gpus = detect_gpus();
     let session = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
+
+    // WebKitGTK can repeatedly abort its web process while creating an EGL
+    // display on Wayland systems using NVIDIA (especially hybrid laptops).
+    // This must be configured before WebKit starts any child processes.
+    let software_rendering = accelerated_compositing_is_unsafe(&gpus, &session)
+        || std::env::var("WEBKIT_DISABLE_COMPOSITING_MODE").as_deref() == Ok("1");
+    SOFTWARE_RENDERING.store(software_rendering, Ordering::Relaxed);
+    if software_rendering {
+        set_env("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+        set_env("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        warn!("GPU: disabling WebKit accelerated compositing to avoid Wayland/NVIDIA EGL crashes");
+    }
 
     let summary = gpus
         .iter()
@@ -81,6 +96,17 @@ pub fn apply(pref: GpuPreference) {
             info!("GPU: keeping the system default (best available)");
         }
     }
+}
+
+pub fn software_rendering_enabled() -> bool {
+    SOFTWARE_RENDERING.load(Ordering::Relaxed)
+}
+
+fn accelerated_compositing_is_unsafe(gpus: &[Gpu], session: &str) -> bool {
+    session.eq_ignore_ascii_case("wayland")
+        && gpus
+            .iter()
+            .any(|gpu| gpu.driver.as_deref() == Some("nvidia"))
 }
 
 fn choose(pref: GpuPreference, gpus: &[Gpu], session: &str) -> Target {
@@ -380,6 +406,24 @@ mod tests {
             choose(GpuPreference::Discrete, &gpus, "x11"),
             Target::Nvidia
         ));
+    }
+
+    #[test]
+    fn wayland_nvidia_uses_software_rendering() {
+        let hybrid = vec![
+            Gpu {
+                name: "Intel UHD".into(),
+                discrete: false,
+                driver: Some("i915".into()),
+            },
+            Gpu {
+                name: "GeForce MX130".into(),
+                discrete: true,
+                driver: Some("nvidia".into()),
+            },
+        ];
+        assert!(accelerated_compositing_is_unsafe(&hybrid, "wayland"));
+        assert!(!accelerated_compositing_is_unsafe(&hybrid, "x11"));
     }
 
     fn parse_sample(sample: &str) -> Vec<Gpu> {

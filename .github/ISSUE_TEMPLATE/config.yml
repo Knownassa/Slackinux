@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Slack service support
+    url: https://slack.com/help/requests/new
+    about: Use official Slack support for account, billing, or Slack service issues.

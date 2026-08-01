@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod deep_links;
+mod diagnostics;
 mod error;
 #[cfg(target_os = "linux")]
 mod frame;
@@ -9,6 +10,7 @@ mod gpu;
 mod navigation;
 mod notifications;
 mod renderer;
+mod runtime;
 mod settings;
 mod updates;
 
@@ -57,9 +59,8 @@ impl AppState {
 }
 
 fn main() -> AppResult<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .format_timestamp_millis()
-        .init();
+    runtime::prefer_host_webkit_for_rolling_appimage();
+    diagnostics::init_logging();
 
     let version = env!("CARGO_PKG_VERSION");
     info!("Slackinux v{version} starting");
@@ -293,6 +294,18 @@ fn main() -> AppResult<()> {
                 MenuItemBuilder::with_id("check_updates", "Check for Updates…").build(app)?;
             let release_notes =
                 MenuItemBuilder::with_id("release_notes", "Release Notes").build(app)?;
+            let open_logs =
+                MenuItemBuilder::with_id("open_logs", "Open Log Folder").build(app)?;
+            let copy_diagnostics =
+                MenuItemBuilder::with_id("copy_diagnostics", "Copy Diagnostic Info").build(app)?;
+            let report_issue =
+                MenuItemBuilder::with_id("report_issue", "Report an Issue…").build(app)?;
+            let diagnostics_menu = SubmenuBuilder::new(app, "Diagnostics")
+                .item(&open_logs)
+                .item(&copy_diagnostics)
+                .separator()
+                .item(&report_issue)
+                .build()?;
             let about = MenuItemBuilder::with_id("about", "About Slackinux").build(app)?;
             let win_minimize = MenuItemBuilder::with_id("win_minimize", "Minimize")
                 .accelerator("CmdOrCtrl+M")
@@ -384,6 +397,7 @@ fn main() -> AppResult<()> {
                 .item(&check_updates)
                 .item(&release_notes)
                 .separator()
+                .item(&diagnostics_menu)
                 .item(&about)
                 .build()?;
 
@@ -513,6 +527,9 @@ fn main() -> AppResult<()> {
                         error!("failed to open release notes: {err}");
                     }
                 }
+                "open_logs" => diagnostics::open_log_folder(app),
+                "copy_diagnostics" => diagnostics::copy_support_report(app),
+                "report_issue" => diagnostics::report_issue(app),
                 "dnd_toggle" => {
                     let state = app.state::<AppState>();
                     let dnd = !state.notif_mgr.is_dnd();
