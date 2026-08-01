@@ -178,7 +178,11 @@ and Slack's preferred color scheme. The selection is saved for future launches.
 - **Account** — sign in, open Slack in your browser, Do Not Disturb, clear cache & restart
 - **View** — zoom and reload controls
 - **Window** — minimize, maximize/restore
-- **Help** — Check for Updates, Release Notes, About
+- **Help** — Check for Updates, Release Notes, Diagnostics, About
+
+Use **Help → Diagnostics** to open the rotating log folder, copy a privacy-safe
+system summary, or open a pre-filled GitHub bug report. Slackinux never adds
+Slack messages, cookies, tokens, or workspace content to the copied summary.
 
 Sign-in/SSO popups open in an in-app window that shares cookies with the main
 webview, so you can authenticate without losing the session. Browser sign-in
@@ -217,8 +221,10 @@ All data lives under the platform app-data directory
   (`auto_check_updates`, `last_update_check_unix`)
 - `downloads/` — files saved from Slack
 
-Settings are written automatically; there is no config file to hand-edit. Logs
-go to stderr; use `RUST_LOG=debug` for verbose output.
+Settings are written automatically; there is no config file to hand-edit.
+Diagnostic logs go to `$XDG_STATE_HOME/slackinux/logs/` (normally
+`~/.local/state/slackinux/logs/`) as `slackinux.log` and
+`slackinux.previous.log`. Use `RUST_LOG=debug` for verbose output.
 
 ---
 
@@ -233,6 +239,7 @@ apps/desktop/
 │       ├── renderer/webkit.rs # WebKitGTK implementation of SlackRenderer
 │       ├── navigation.rs      # URL classification engine (allow/deny/open)
 │       ├── notifications.rs   # native notifications, DND, click-to-focus
+│       ├── diagnostics.rs     # rotating logs and privacy-safe bug reports
 │       ├── settings.rs        # persisted settings
 │       ├── updates.rs         # signed GitHub updater (check/install/restart)
 │       └── error.rs           # AppError / AppResult (thiserror)
@@ -268,8 +275,13 @@ with `scripts/check-version-consistency.sh` (also run in CI).
 ## Troubleshooting
 
 - **Blank window on launch** — AppImage rendering uses compatibility-aware
-  hardware acceleration. A failed or stuck load returns to a visible retry
-  screen; use `RUST_LOG=debug` for diagnostics.
+  hardware acceleration and automatically switches to software compositing on
+  Wayland/NVIDIA systems where WebKit's EGL process is unsafe. On Arch-family
+  distributions, the AppImage uses the host WebKitGTK instead of mixing its
+  Ubuntu runtime with newer Mesa/NVIDIA libraries. A failed or stuck load
+  returns to a visible retry screen; use **Help → Diagnostics → Open Log
+  Folder** to find the current and previous logs. Start with `RUST_LOG=debug`
+  when more detail is needed.
 - **Browser says no app can open `slack://`** — reinstall the current AppImage
   with `install.sh`, or launch the current Slackinux once so it registers the
   callback handler for your user account.
@@ -296,8 +308,9 @@ discussed. For code changes:
    `cargo clippy --workspace --all-targets -- -D warnings`.
 3. Open a pull request describing the user impact and how it was tested.
 
-Bug reports should include the Linux distribution, desktop environment,
-Wayland/X11 session, installation format, and relevant `RUST_LOG=debug` output.
+The fastest way to file a useful bug report is **Help → Diagnostics → Report an
+Issue…**. Review logs before attaching them; debug logs can contain navigation
+details even though Slackinux never uploads logs automatically.
 
 ---
 

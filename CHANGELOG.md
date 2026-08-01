@@ -2,8 +2,13 @@
 
 All notable changes to Slackinux are documented here.
 
-## Unreleased
+## 0.2.3 - 2026-08-02
 
+- Added **Help → Diagnostics** actions to open persistent rotating logs, copy a
+  privacy-safe system summary, and create a pre-filled GitHub bug report.
+- Fixed black AppImage windows on Wayland/NVIDIA systems by automatically
+  disabling the WebKit EGL compositing path, using the host WebKitGTK runtime
+  on Arch-family distributions, and bounding crash recovery.
 - Fixed AppImage updates failing with `403 Forbidden` by using public GitHub
   release-download URLs instead of authenticated asset API URLs.
 

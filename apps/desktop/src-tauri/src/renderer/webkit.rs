@@ -50,14 +50,16 @@ impl WebKitRenderer {
             let wk = pw.inner();
             if let Some(settings) = wk.settings() {
                 settings.set_enable_webrtc(true);
-                // "Always" can produce a fully blank AppImage window with
-                // some hybrid NVIDIA/Wayland combinations. OnDemand retains
-                // acceleration where WebKit can use it safely and falls back
-                // to software rendering when it cannot.
-                settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::OnDemand);
+                if crate::gpu::software_rendering_enabled() {
+                    settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Never);
+                    info!("Rendering: software compositing (Wayland/NVIDIA compatibility)");
+                } else {
+                    settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::OnDemand);
+                    info!("Rendering: hardware acceleration on demand");
+                }
                 settings.set_enable_smooth_scrolling(true);
                 info!("WebRTC: enabled via WebKitGTK settings");
-                info!("Rendering: hardware acceleration on demand, smooth scrolling enabled");
+                info!("Rendering: smooth scrolling enabled");
             } else {
                 warn!("WebRTC: could not get WebKitGTK settings");
             }
@@ -282,14 +284,29 @@ impl WebKitRenderer {
     #[cfg(target_os = "linux")]
     fn setup_crash_recovery(&self) {
         let _ = self.window.with_webview(|pw| {
-            use webkit2gtk::WebViewExt;
+            use webkit2gtk::{LoadEvent, WebViewExt};
             let wk = pw.inner();
-            wk.connect_web_process_terminated(|webview, reason| {
+            let consecutive_crashes = std::rc::Rc::new(std::cell::Cell::new(0_u8));
+            let reset_crashes = consecutive_crashes.clone();
+            wk.connect_load_changed(move |_, event| {
+                if event == LoadEvent::Finished {
+                    reset_crashes.set(0);
+                }
+            });
+            wk.connect_web_process_terminated(move |webview, reason| {
                 use webkit2gtk::WebProcessTerminationReason;
                 match reason {
                     WebProcessTerminationReason::Crashed => {
-                        warn!("Web process crashed — reloading");
-                        webview.reload();
+                        let attempts = consecutive_crashes.get().saturating_add(1);
+                        consecutive_crashes.set(attempts);
+                        if attempts <= 2 {
+                            warn!("Web process crashed — reload attempt {attempts}/2");
+                            webview.reload();
+                        } else {
+                            warn!(
+                                "Web process crashed repeatedly — stopping automatic reload loop"
+                            );
+                        }
                     }
                     WebProcessTerminationReason::ExceededMemoryLimit => {
                         warn!("Web process exceeded memory limit — reloading");
