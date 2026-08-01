@@ -2,6 +2,14 @@
 
 All notable changes to Slackinux are documented here.
 
+## 0.2.1 - 2026-08-01
+
+- Replaced every application, launcher, package, and tray icon size with the
+  new Slackinux application logo.
+- Added retry and GitHub Releases recovery actions when an update-feed request
+  is temporarily unavailable or blocked by the network.
+- Added an RPM package target and release artifact for RPM-based distributions.
+
 ## 0.2.0 - 2026-07-31
 
 - Added signed update checks backed by GitHub Releases.

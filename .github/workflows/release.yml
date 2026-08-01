@@ -26,7 +26,8 @@ jobs:
             librsvg2-dev \
             patchelf \
             libfuse2 \
-            file
+            file \
+            rpm
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -74,6 +75,6 @@ jobs:
             Existing updater-enabled installations will be notified automatically.
           releaseDraft: true
           prerelease: false
-          args: "--bundles appimage,deb"
+          args: "--bundles appimage,deb,rpm"
           uploadUpdaterJson: true
           uploadUpdaterSignatures: true

@@ -9,6 +9,7 @@
 # Local release artifacts (published through GitHub Releases)
 /Slackinux_*.AppImage
 /Slackinux_*.deb
+/Slackinux-*.rpm
 
 # Editors and operating systems
 .DS_Store

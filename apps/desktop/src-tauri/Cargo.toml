@@ -1,6 +1,6 @@
 [package]
 name = "slackinux"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "An unofficial, resource-conscious Linux desktop shell for Slack Web."
 license = "MIT"

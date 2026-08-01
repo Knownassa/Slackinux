@@ -3,7 +3,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use log::{debug, error, info};
 use tauri::Manager;
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_dialog::{
+    DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
+};
 use tauri_plugin_updater::{Update, UpdaterExt};
 use thiserror::Error;
 
@@ -83,6 +85,33 @@ pub fn schedule_startup_check(app: tauri::AppHandle) {
     });
 }
 
+/// Adds actionable context without claiming that valid GitHub JSON is broken.
+/// Tauri also uses this generic error when the endpoint returns a temporary
+/// non-success status, so the useful response is to retry or use Releases.
+fn friendly_check_error(message: &str) -> String {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("release json") || lower.contains("could not fetch") {
+        format!(
+            "{message}\n\nGitHub did not return the Slackinux update feed. This can be \
+             temporary, or GitHub may be blocked by your network. You can retry now or \
+             open GitHub Releases and download the update manually."
+        )
+    } else if lower.contains("connection")
+        || lower.contains("timed out")
+        || lower.contains("network")
+    {
+        format!(
+            "{message}\n\nCheck your internet connection, proxy, VPN, and system clock. \
+             You can retry now or download the update from GitHub Releases."
+        )
+    } else {
+        format!(
+            "{message}\n\nYou can retry now or download the update manually from GitHub \
+             Releases."
+        )
+    }
+}
+
 /// The single entry point for update checks. Manual checks always notify the
 /// user of the outcome; automatic checks stay silent unless an update exists.
 pub fn check_for_updates(app: tauri::AppHandle, reason: UpdateCheckReason) {
@@ -100,12 +129,44 @@ pub fn check_for_updates(app: tauri::AppHandle, reason: UpdateCheckReason) {
                     );
                 }
             }
+            Err(UpdateError::Check(message)) if reason == UpdateCheckReason::Manual => {
+                show_check_error(&app, &message);
+            }
             Err(err) if reason == UpdateCheckReason::Manual => {
                 show_error(&app, "Update Check Failed", &err.to_string());
             }
             Err(err) => info!("updates: automatic check failed quietly: {err}"),
         }
     });
+}
+
+/// Gives a failed manual check a recovery path instead of a dead-end error.
+fn show_check_error(app: &tauri::AppHandle, message: &str) {
+    let action_app = app.clone();
+    app.dialog()
+        .message(friendly_check_error(message))
+        .title("Update Check Failed")
+        .kind(MessageDialogKind::Error)
+        .buttons(MessageDialogButtons::YesNoCancelCustom(
+            "Retry".into(),
+            "Open Releases".into(),
+            "Close".into(),
+        ))
+        .show_with_result(move |result| match result {
+            MessageDialogResult::Yes => {
+                check_for_updates(action_app.clone(), UpdateCheckReason::Manual);
+            }
+            MessageDialogResult::No => {
+                open_release_page(&action_app);
+            }
+            MessageDialogResult::Custom(label) if label == "Retry" => {
+                check_for_updates(action_app.clone(), UpdateCheckReason::Manual);
+            }
+            MessageDialogResult::Custom(label) if label == "Open Releases" => {
+                open_release_page(&action_app);
+            }
+            _ => {}
+        });
 }
 
 async fn run_check(app: &tauri::AppHandle, reason: UpdateCheckReason) -> Result<(), UpdateError> {
@@ -423,5 +484,13 @@ mod tests {
         assert!(UpdateLockGuard::acquire().is_none());
         drop(first);
         assert!(UpdateLockGuard::acquire().is_some());
+    }
+
+    #[test]
+    fn release_feed_error_offers_recovery() {
+        let message = friendly_check_error("Could not fetch a valid release JSON from the remote");
+        assert!(message.contains("GitHub did not return the Slackinux update feed"));
+        assert!(message.contains("retry now"));
+        assert!(!message.contains("first Slackinux release"));
     }
 }

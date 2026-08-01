@@ -4,7 +4,7 @@
 
 ### Slack on Linux, without the Electron overhead
 
-<img src="branding/slackinux-color.png" alt="Slackinux logo" width="160">
+<img src="SlackinuxAppLogo.png" alt="Slackinux logo" width="160">
 
 An unofficial, resource-conscious desktop shell for Slack Web,<br>
 built with Rust, Tauri 2, and the system WebKitGTK renderer.
@@ -130,6 +130,9 @@ NO_STRIP=1 cargo tauri build --bundles appimage
 
 # Debian package
 cargo tauri build --bundles deb
+
+# RPM package (requires rpmbuild installed)
+cargo tauri build --bundles rpm
 ```
 
 Artifacts land in `target/release/bundle/`. On Arch-based distros set
@@ -176,8 +179,8 @@ reports the outcome.
 How an update is applied depends on how Slackinux was installed:
 
 - **AppImage** — downloads, verifies the signature, installs, and restarts in place
-- **`.deb` / package-managed install** — opens the GitHub release page instead
-  of replacing files behind the package manager's back
+- **`.deb` / `.rpm` / package-managed install** — opens the GitHub release page
+  instead of replacing files behind the package manager's back
 - **Development builds** — never check automatically
 
 Updates are verified with the public key embedded in Slackinux. The release
