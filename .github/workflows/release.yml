@@ -92,14 +92,16 @@ jobs:
           gh release download "$GITHUB_REF_NAME" \
             --pattern latest.json \
             --dir "$release_dir"
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" \
+          # The releases/tags API returns 404 for drafts. `gh release view`
+          # resolves draft tags and exposes each asset's API URL.
+          gh release view "$GITHUB_REF_NAME" --json assets \
             > "$release_dir/release.json"
 
           base_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/"
           jq \
             --slurpfile release "$release_dir/release.json" \
             --arg base_url "$base_url" \
-            '($release[0].assets | map({key: .url, value: .name}) | from_entries) as $names
+            '($release[0].assets | map({key: .apiUrl, value: .name}) | from_entries) as $names
              | .platforms |= with_entries(.value.url = ($base_url + $names[.value.url]))' \
             "$release_dir/latest.json" \
             > "$release_dir/latest.fixed.json"
