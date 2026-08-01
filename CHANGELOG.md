@@ -2,6 +2,11 @@
 
 All notable changes to Slackinux are documented here.
 
+## Unreleased
+
+- Fixed AppImage updates failing with `403 Forbidden` by using public GitHub
+  release-download URLs instead of authenticated asset API URLs.
+
 ## 0.2.2 - 2026-08-02
 
 - Added a persistent **Theme** menu to the top panel with System, Light, and
