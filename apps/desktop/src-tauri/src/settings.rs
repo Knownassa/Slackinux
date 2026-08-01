@@ -27,6 +27,14 @@ pub struct Settings {
     pub dnd: bool,
     #[serde(default)]
     pub gpu_preference: GpuPreference,
+    #[serde(default = "default_auto_check_updates")]
+    pub auto_check_updates: bool,
+    #[serde(default)]
+    pub last_update_check_unix: i64,
+}
+
+fn default_auto_check_updates() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -35,6 +43,8 @@ impl Default for Settings {
             zoom_level: 10,
             dnd: false,
             gpu_preference: GpuPreference::Auto,
+            auto_check_updates: true,
+            last_update_check_unix: 0,
         }
     }
 }
@@ -68,6 +78,8 @@ mod tests {
         assert_eq!(settings.zoom_level, 10);
         assert!(!settings.dnd);
         assert_eq!(settings.gpu_preference, GpuPreference::Auto);
+        assert!(settings.auto_check_updates);
+        assert_eq!(settings.last_update_check_unix, 0);
     }
 
     #[test]
@@ -80,6 +92,8 @@ mod tests {
             zoom_level: 15,
             dnd: true,
             gpu_preference: GpuPreference::Discrete,
+            auto_check_updates: false,
+            last_update_check_unix: 1_700_000_000,
         };
         settings.save(&dir);
 
@@ -87,6 +101,8 @@ mod tests {
         assert_eq!(loaded.zoom_level, 15);
         assert!(loaded.dnd);
         assert_eq!(loaded.gpu_preference, GpuPreference::Discrete);
+        assert!(!loaded.auto_check_updates);
+        assert_eq!(loaded.last_update_check_unix, 1_700_000_000);
     }
 
     #[test]
@@ -115,5 +131,22 @@ mod tests {
         assert_eq!(settings.zoom_level, 12);
         assert!(settings.dnd);
         assert_eq!(settings.gpu_preference, GpuPreference::Auto);
+        assert!(settings.auto_check_updates);
+    }
+
+    #[test]
+    fn update_fields_default_when_absent() {
+        let dir = std::env::temp_dir().join("slackinux_settings_no_updater_fields");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"zoom_level": 10, "dnd": false, "gpu_preference": "auto"}"#,
+        )
+        .unwrap();
+
+        let settings = Settings::load(&dir);
+        assert!(settings.auto_check_updates);
+        assert_eq!(settings.last_update_check_unix, 0);
     }
 }

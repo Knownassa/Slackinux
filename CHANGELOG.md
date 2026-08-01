@@ -5,10 +5,16 @@ All notable changes to Slackinux are documented here.
 ## 0.2.0 - 2026-07-31
 
 - Added signed update checks backed by GitHub Releases.
-- Added automatic update-available notifications after startup.
-- Added **Account → Check for Updates** with download, install, and restart.
-- Added a GitHub Actions workflow that creates signed Linux installers and
-  the updater `latest.json` manifest from version tags.
+- Added **Help → Check for Updates…** and **Help → Release Notes**.
+- Added an automatic update check ~20 seconds after startup, at most once per
+  day, silent when offline or up to date; cadence persisted in settings.
+- AppImage builds download, verify, install, and restart in place; package
+  manager and development builds open the GitHub release instead.
+- Added a GitHub Actions CI workflow (fmt, clippy, tests, frontend build,
+  version consistency) and a release workflow that creates signed Linux
+  installers and the updater `latest.json` manifest from version tags.
+- Added `scripts/set-version.sh` and `scripts/check-version-consistency.sh` to
+  keep `package.json`, `Cargo.toml`, and `tauri.conf.json` versions in sync.
 - Refined the custom top panel with clearer spacing, theme-aware menu states,
   improved window controls, and double-click maximize/restore behavior.
 

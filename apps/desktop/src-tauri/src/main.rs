@@ -9,10 +9,10 @@ mod navigation;
 mod notifications;
 mod renderer;
 mod settings;
-mod updater;
+mod updates;
 
 use std::env;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU16, Ordering};
 use std::sync::Arc;
 
 use error::{AppError, AppResult};
@@ -32,6 +32,25 @@ struct AppState {
     data_dir: std::path::PathBuf,
     zoom_level: Arc<AtomicU16>,
     gpu_preference: Arc<std::sync::Mutex<settings::GpuPreference>>,
+    auto_check_updates: Arc<AtomicBool>,
+    last_update_check_unix: Arc<AtomicI64>,
+}
+
+impl AppState {
+    /// Rebuilds the persisted settings snapshot from the live state.
+    fn settings(&self) -> settings::Settings {
+        settings::Settings {
+            zoom_level: self.zoom_level.load(Ordering::Relaxed),
+            dnd: self.notif_mgr.is_dnd(),
+            gpu_preference: *self.gpu_preference.lock().unwrap(),
+            auto_check_updates: self.auto_check_updates.load(Ordering::Relaxed),
+            last_update_check_unix: self.last_update_check_unix.load(Ordering::Relaxed),
+        }
+    }
+
+    fn set_last_update_check(&self, unix: i64) {
+        self.last_update_check_unix.store(unix, Ordering::Relaxed);
+    }
 }
 
 fn main() -> AppResult<()> {
@@ -178,6 +197,10 @@ fn main() -> AppResult<()> {
                 data_dir: data_dir.clone(),
                 zoom_level: zoom_level.clone(),
                 gpu_preference: gpu_pref,
+                auto_check_updates: Arc::new(AtomicBool::new(user_settings.auto_check_updates)),
+                last_update_check_unix: Arc::new(AtomicI64::new(
+                    user_settings.last_update_check_unix,
+                )),
             });
 
             // --- App menu: Slack-desktop-style (File/Edit/View/History/Window/
@@ -238,7 +261,9 @@ fn main() -> AppResult<()> {
             let clear_cache = MenuItemBuilder::with_id("clear_cache", "Clear Cache & Restart")
                 .build(app)?;
             let check_updates =
-                MenuItemBuilder::with_id("check_updates", "Check for Updates").build(app)?;
+                MenuItemBuilder::with_id("check_updates", "Check for Updates…").build(app)?;
+            let release_notes =
+                MenuItemBuilder::with_id("release_notes", "Release Notes").build(app)?;
             let about = MenuItemBuilder::with_id("about", "About Slackinux").build(app)?;
             let win_minimize = MenuItemBuilder::with_id("win_minimize", "Minimize")
                 .accelerator("CmdOrCtrl+M")
@@ -308,13 +333,17 @@ fn main() -> AppResult<()> {
                 .item(&win_maximize)
                 .build()?;
 
-            let help_menu = SubmenuBuilder::new(app, "Help").item(&about).build()?;
+            let help_menu = SubmenuBuilder::new(app, "Help")
+                .item(&check_updates)
+                .item(&release_notes)
+                .separator()
+                .item(&about)
+                .build()?;
 
             let account_menu = SubmenuBuilder::new(app, "Account")
                 .item(&login_in_app)
                 .item(&login_browser)
                 .separator()
-                .item(&check_updates)
                 .item(&dnd_toggle)
                 .item(&clear_cache)
                 .build()?;
@@ -355,7 +384,7 @@ fn main() -> AppResult<()> {
             info!("navigating to Slack URL");
             renderer.navigate(slack_url.as_str())?;
 
-            updater::schedule_startup_check(app.handle().clone());
+            updates::schedule_startup_check(app.handle().clone());
 
             info!("webview created successfully");
             Ok(())
@@ -410,12 +439,7 @@ fn main() -> AppResult<()> {
                     let level = f64::from(new_level) / 10.0;
                     let state = app.state::<AppState>();
                     let _ = state.renderer.set_zoom_level(level);
-                    settings::Settings {
-                        zoom_level: new_level,
-                        dnd: state.notif_mgr.is_dnd(),
-                        gpu_preference: *state.gpu_preference.lock().unwrap(),
-                    }
-                    .save(&state.data_dir);
+                    state.settings().save(&state.data_dir);
                     info!("zoom: {level:.1}x");
                 }
                 "login_in_app" => {
@@ -430,18 +454,20 @@ fn main() -> AppResult<()> {
                     }
                 }
                 "check_updates" => {
-                    updater::check_for_updates(app.clone(), true);
+                    updates::check_for_updates(app.clone(), updates::UpdateCheckReason::Manual);
+                }
+                "release_notes" => {
+                    if let Err(err) =
+                        open::that_detached("https://github.com/Knownassa/Slackinux/releases")
+                    {
+                        error!("failed to open release notes: {err}");
+                    }
                 }
                 "dnd_toggle" => {
                     let state = app.state::<AppState>();
                     let dnd = !state.notif_mgr.is_dnd();
                     state.notif_mgr.set_dnd(dnd);
-                    settings::Settings {
-                        zoom_level: state.zoom_level.load(Ordering::Relaxed),
-                        dnd,
-                        gpu_preference: *state.gpu_preference.lock().unwrap(),
-                    }
-                    .save(&state.data_dir);
+                    state.settings().save(&state.data_dir);
                 }
                 "clear_cache" => {
                     let state = app.state::<AppState>();
@@ -464,12 +490,7 @@ fn main() -> AppResult<()> {
                         _ => settings::GpuPreference::Discrete,
                     };
                     *state.gpu_preference.lock().unwrap() = pref;
-                    settings::Settings {
-                        zoom_level: state.zoom_level.load(Ordering::Relaxed),
-                        dnd: state.notif_mgr.is_dnd(),
-                        gpu_preference: pref,
-                    }
-                    .save(&state.data_dir);
+                    state.settings().save(&state.data_dir);
                     set_graphics_checks(app, pref);
                     info!("graphics preference: {pref} (applies after restart)");
                     app.dialog()
