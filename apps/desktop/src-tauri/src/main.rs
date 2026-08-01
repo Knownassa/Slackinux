@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod deep_links;
 mod error;
 #[cfg(target_os = "linux")]
 mod frame;
@@ -16,7 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU16, Ordering};
 use std::sync::Arc;
 
 use error::{AppError, AppResult};
-use log::{error, info};
+use log::{error, info, warn};
 use notifications::NotificationManager;
 use renderer::{webkit::WebKitRenderer, SlackRenderer};
 use tauri::{
@@ -32,6 +33,7 @@ struct AppState {
     data_dir: std::path::PathBuf,
     zoom_level: Arc<AtomicU16>,
     gpu_preference: Arc<std::sync::Mutex<settings::GpuPreference>>,
+    theme_preference: Arc<std::sync::Mutex<settings::ThemePreference>>,
     auto_check_updates: Arc<AtomicBool>,
     last_update_check_unix: Arc<AtomicI64>,
 }
@@ -43,6 +45,7 @@ impl AppState {
             zoom_level: self.zoom_level.load(Ordering::Relaxed),
             dnd: self.notif_mgr.is_dnd(),
             gpu_preference: *self.gpu_preference.lock().unwrap(),
+            theme_preference: *self.theme_preference.lock().unwrap(),
             auto_check_updates: self.auto_check_updates.load(Ordering::Relaxed),
             last_update_check_unix: self.last_update_check_unix.load(Ordering::Relaxed),
         }
@@ -72,15 +75,32 @@ fn main() -> AppResult<()> {
     let zoom_level_menu = zoom_level.clone();
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            handle_slack_launch_args(app, &argv);
             if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
                 let _ = window.set_focus();
             }
         }))
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
+            #[cfg(target_os = "linux")]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                // AppImages do not have a traditional installer. Registering
+                // here makes browser sign-in callbacks work even when the
+                // user launches the AppImage directly or moves it.
+                if let Err(err) = app.deep_link().register_all() {
+                    // Missing desktop-database tools must never prevent Slack
+                    // itself from opening; packaged and shell installs still
+                    // carry the static MIME association.
+                    warn!("could not register Slack browser callback handler: {err}");
+                }
+            }
+
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir).ok();
             migrate_legacy_data_dir(&data_dir);
@@ -91,9 +111,10 @@ fn main() -> AppResult<()> {
 
             let user_settings = settings::Settings::load(&data_dir);
             info!(
-                "loaded settings: zoom={}x, dnd={}",
+                "loaded settings: zoom={}x, dnd={}, theme={}",
                 f64::from(user_settings.zoom_level) / 10.0,
-                user_settings.dnd
+                user_settings.dnd,
+                user_settings.theme_preference
             );
 
             #[cfg(target_os = "linux")]
@@ -119,11 +140,18 @@ fn main() -> AppResult<()> {
             .inner_size(1280.0, 800.0)
             .decorations(false)
             .transparent(true)
+            .theme(match user_settings.theme_preference {
+                settings::ThemePreference::System => None,
+                settings::ThemePreference::Light => Some(tauri::Theme::Light),
+                settings::ThemePreference::Dark => Some(tauri::Theme::Dark),
+            })
             .build()
             .map_err(AppError::Tauri)?;
 
+            let theme_preference = Arc::new(std::sync::Mutex::new(user_settings.theme_preference));
+
             #[cfg(target_os = "linux")]
-            frame::apply_custom_frame(app.handle(), &window);
+            frame::apply_custom_frame(app.handle(), &window, theme_preference.clone());
 
             let download_dir = data_dir.join("downloads");
             std::fs::create_dir_all(&download_dir).ok();
@@ -197,6 +225,7 @@ fn main() -> AppResult<()> {
                 data_dir: data_dir.clone(),
                 zoom_level: zoom_level.clone(),
                 gpu_preference: gpu_pref,
+                theme_preference: theme_preference.clone(),
                 auto_check_updates: Arc::new(AtomicBool::new(user_settings.auto_check_updates)),
                 last_update_check_unix: Arc::new(AtomicI64::new(
                     user_settings.last_update_check_unix,
@@ -270,6 +299,24 @@ fn main() -> AppResult<()> {
                 .build(app)?;
             let win_maximize =
                 MenuItemBuilder::with_id("win_maximize", "Maximize / Restore").build(app)?;
+
+            let theme_menu = {
+                use tauri::menu::CheckMenuItemBuilder;
+                let theme_system = CheckMenuItemBuilder::with_id("theme_system", "System")
+                    .checked(user_settings.theme_preference == settings::ThemePreference::System)
+                    .build(app)?;
+                let theme_light = CheckMenuItemBuilder::with_id("theme_light", "Light")
+                    .checked(user_settings.theme_preference == settings::ThemePreference::Light)
+                    .build(app)?;
+                let theme_dark = CheckMenuItemBuilder::with_id("theme_dark", "Dark")
+                    .checked(user_settings.theme_preference == settings::ThemePreference::Dark)
+                    .build(app)?;
+                SubmenuBuilder::with_id(app, "theme", "Theme")
+                    .item(&theme_system)
+                    .item(&theme_light)
+                    .item(&theme_dark)
+                    .build()?
+            };
 
             #[cfg(target_os = "linux")]
             let graphics_menu = {
@@ -354,6 +401,7 @@ fn main() -> AppResult<()> {
                 .item(&view_menu)
                 .item(&history_menu)
                 .item(&window_menu)
+                .item(&theme_menu)
                 .item(&help_menu)
                 .build()?;
             app.set_menu(menu)?;
@@ -381,8 +429,10 @@ fn main() -> AppResult<()> {
             info!("zoom: {saved_zoom:.1}x (saved)");
 
             // --- Navigation ---
+            let initial_url = deep_links::slack_url_from_args(&env::args().collect::<Vec<_>>())
+                .unwrap_or(slack_url);
             info!("navigating to Slack URL");
-            renderer.navigate(slack_url.as_str())?;
+            renderer.navigate(initial_url.as_str())?;
 
             updates::schedule_startup_check(app.handle().clone());
 
@@ -502,6 +552,22 @@ fn main() -> AppResult<()> {
                         .kind(tauri_plugin_dialog::MessageDialogKind::Info)
                         .show(|_| {});
                 }
+                "theme_system" | "theme_light" | "theme_dark" => {
+                    let preference = match id {
+                        "theme_light" => settings::ThemePreference::Light,
+                        "theme_dark" => settings::ThemePreference::Dark,
+                        _ => settings::ThemePreference::System,
+                    };
+                    let state = app.state::<AppState>();
+                    *state.theme_preference.lock().unwrap() = preference;
+                    state.settings().save(&state.data_dir);
+                    set_theme_checks(app, preference);
+                    if let Some(window) = app.get_webview_window("main") {
+                        #[cfg(target_os = "linux")]
+                        frame::set_theme(&window, preference);
+                    }
+                    info!("theme preference: {preference}");
+                }
                 "gpu_restart" => {
                     if let Ok(exe) = std::env::current_exe() {
                         let _ = std::process::Command::new(exe).spawn();
@@ -527,7 +593,7 @@ fn main() -> AppResult<()> {
                         .message(format!(
                             "Slackinux v{version}\n\nAn unofficial, resource-conscious \
                              Linux desktop shell for Slack Web.\n\nBuilt with Tauri 2 + WebKitGTK.\n\n\
-                             Not affiliated with or endorsed by Slack Technologies."
+                             Published by Knownassa.\n\nNot affiliated with or endorsed by Slack Technologies."
                         ))
                         .title("About Slackinux")
                         .kind(tauri_plugin_dialog::MessageDialogKind::Info)
@@ -639,6 +705,20 @@ fn parse_unread_count(title: &str) -> u32 {
     0
 }
 
+fn handle_slack_launch_args(app: &tauri::AppHandle, args: &[String]) {
+    let Some(url) = deep_links::slack_url_from_args(args) else {
+        return;
+    };
+    let Some(state) = app.try_state::<AppState>() else {
+        warn!("Slack callback arrived before the renderer was ready");
+        return;
+    };
+    info!("opening Slack browser callback in Slackinux");
+    if let Err(err) = state.renderer.navigate(url.as_str()) {
+        error!("failed to open Slack browser callback: {err}");
+    }
+}
+
 /// Keeps the Graphics menu check items consistent with the chosen preference.
 fn set_graphics_checks(app: &tauri::AppHandle, pref: settings::GpuPreference) {
     use tauri::menu::MenuItemKind;
@@ -658,6 +738,27 @@ fn set_graphics_checks(app: &tauri::AppHandle, pref: settings::GpuPreference) {
     ];
     for (id, checked) in states {
         if let Some(MenuItemKind::Check(item)) = graphics.get(id) {
+            let _ = item.set_checked(checked);
+        }
+    }
+}
+
+/// Keeps the Theme menu check items mutually exclusive.
+fn set_theme_checks(app: &tauri::AppHandle, pref: settings::ThemePreference) {
+    use tauri::menu::MenuItemKind;
+    let Some(menu) = app.menu() else {
+        return;
+    };
+    let Some(MenuItemKind::Submenu(theme)) = menu.get("theme") else {
+        return;
+    };
+    let states = [
+        ("theme_system", pref == settings::ThemePreference::System),
+        ("theme_light", pref == settings::ThemePreference::Light),
+        ("theme_dark", pref == settings::ThemePreference::Dark),
+    ];
+    for (id, checked) in states {
+        if let Some(MenuItemKind::Check(item)) = theme.get(id) {
             let _ = item.set_checked(checked);
         }
     }

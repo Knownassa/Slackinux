@@ -70,7 +70,9 @@ jobs:
           tagName: v__VERSION__
           releaseName: "Slackinux v__VERSION__"
           releaseBody: |
-            Download the Debian package for Debian/Ubuntu or the AppImage for other Linux distributions.
+            Download the Debian package for Debian/Ubuntu, RPM for Fedora/RHEL/openSUSE,
+            or the AppImage for other Linux distributions. A POSIX shell installer is
+            also available from the repository README.
 
             Existing updater-enabled installations will be notified automatically.
           releaseDraft: true

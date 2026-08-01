@@ -34,6 +34,7 @@ impl WebKitRenderer {
         self.enable_webrtc();
         self.enable_spellcheck();
         self.setup_navigation_policy(app_handle.clone());
+        self.setup_load_recovery();
         self.setup_permission_logging();
         self.setup_crash_recovery();
         self.setup_notifications(notif_mgr, app_handle);
@@ -49,13 +50,56 @@ impl WebKitRenderer {
             let wk = pw.inner();
             if let Some(settings) = wk.settings() {
                 settings.set_enable_webrtc(true);
-                settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Always);
+                // "Always" can produce a fully blank AppImage window with
+                // some hybrid NVIDIA/Wayland combinations. OnDemand retains
+                // acceleration where WebKit can use it safely and falls back
+                // to software rendering when it cannot.
+                settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::OnDemand);
                 settings.set_enable_smooth_scrolling(true);
                 info!("WebRTC: enabled via WebKitGTK settings");
-                info!("Rendering: hardware acceleration forced, smooth scrolling enabled");
+                info!("Rendering: hardware acceleration on demand, smooth scrolling enabled");
             } else {
                 warn!("WebRTC: could not get WebKitGTK settings");
             }
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    fn setup_load_recovery(&self) {
+        let _ = self.window.with_webview(|pw| {
+            use webkit2gtk::{LoadEvent, WebViewExt};
+            let wk = pw.inner();
+            let load_generation = std::rc::Rc::new(std::cell::Cell::new(0_u64));
+
+            wk.connect_load_failed(|webview, _event, failing_uri, error| {
+                if !failing_uri.starts_with("http://") && !failing_uri.starts_with("https://") {
+                    return false;
+                }
+                warn!("Slack page failed to load: {error}");
+                webview.load_uri("tauri://localhost/bootstrap/index.html?error=load");
+                true
+            });
+
+            wk.connect_load_changed(move |webview, event| {
+                if event != LoadEvent::Started {
+                    return;
+                }
+                let generation = load_generation.get().wrapping_add(1);
+                load_generation.set(generation);
+                let current_generation = load_generation.clone();
+                let pending = webview.clone();
+                gtk::glib::timeout_add_local_once(std::time::Duration::from_secs(45), move || {
+                    let uri = pending.uri().unwrap_or_default();
+                    if current_generation.get() == generation
+                        && pending.is_loading()
+                        && (uri.starts_with("http://") || uri.starts_with("https://"))
+                    {
+                        warn!("Slack page remained blank/loading for 45 seconds; showing recovery");
+                        pending.stop_loading();
+                        pending.load_uri("tauri://localhost/bootstrap/index.html?error=timeout");
+                    }
+                });
+            });
         });
     }
 

@@ -2,6 +2,18 @@
 
 All notable changes to Slackinux are documented here.
 
+## 0.2.2 - 2026-08-02
+
+- Added a persistent **Theme** menu to the top panel with System, Light, and
+  Dark options that update Slack and the native window chrome immediately.
+- Added a POSIX-compatible shell installer with automatic DEB, RPM, and
+  per-user AppImage selection.
+- Standardized the application and Linux package publisher as Knownassa.
+- Registered Slackinux as the Linux `slack://` browser callback handler and
+  added safe workspace/channel callback navigation for first and running app instances.
+- Switched AppImage rendering to WebKit's on-demand acceleration mode and added
+  a visible retry screen for failed or stuck Slack page loads.
+
 ## 0.2.1 - 2026-08-01
 
 - Replaced every application, launcher, package, and tray icon size with the

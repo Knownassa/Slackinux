@@ -68,17 +68,32 @@ focused native Linux shell around the official web application.
 | **Tray + unread badge** | Close-to-tray, left-click toggle, pending-message count in the tooltip |
 | **Custom frame** | Frameless rounded window with a native app menu and window controls |
 | **Downloads** | Saved to the app data directory (`downloads/`) |
-| **Persisted settings** | Zoom, DND, GPU preference, and update cadence survive restarts |
+| **Persisted settings** | Theme, zoom, DND, GPU preference, and update cadence survive restarts |
 
 ---
 
 ## Install
 
-Download the current Linux installers from the
+Install the latest compatible package from any POSIX shell (`sh`, `dash`,
+`bash`, or `zsh`) with:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Knownassa/Slackinux/main/install.sh | sh
+```
+
+The installer automatically chooses DEB on Debian/Ubuntu, RPM on Fedora/RHEL/
+openSUSE, and a per-user AppImage elsewhere. Download and inspect
+[`install.sh`](install.sh) first if you prefer not to pipe a script into a shell.
+Use `sh install.sh --help` to select a package format explicitly, or
+`sh install.sh --dry-run` to verify compatibility without installing anything.
+
+Alternatively, download an installer manually from the
 [latest GitHub release](https://github.com/Knownassa/Slackinux/releases/latest):
 
 - **Debian / Ubuntu** — download the `.deb` and run
   `sudo apt install ./Slackinux_*_amd64.deb`
+- **Fedora / RHEL / openSUSE** — download the `.rpm` and install it with your
+  distribution's package manager
 - **Other Linux distributions** — download the `.AppImage`, make it executable
   with `chmod +x Slackinux_*.AppImage`, then run it (if FUSE is unavailable,
   use `--appimage-extract-and-run`)
@@ -150,12 +165,15 @@ Artifacts land in `target/release/bundle/`. On Arch-based distros set
 | Minimize | `Ctrl+M` |
 | Quit | `Ctrl+Q` |
 
-The app menu (File, Edit, View, History, Window, Help) sits at the left of the
+The app menu (File, Edit, View, History, Window, Theme, Help) sits at the left of the
 custom titlebar, with minimize, maximize, and close buttons on the right. Drag
 the titlebar to move the window, double-click to maximize, and right-click it
 for a window menu. Closing the window hides it to the tray; use the tray menu's
 **Quit** to fully exit. Unread Slack messages appear as a count in the tray
 tooltip.
+
+Use **Theme → System**, **Light**, or **Dark** to change the native top panel
+and Slack's preferred color scheme. The selection is saved for future launches.
 
 - **Account** — sign in, open Slack in your browser, Do Not Disturb, clear cache & restart
 - **View** — zoom and reload controls
@@ -163,9 +181,9 @@ tooltip.
 - **Help** — Check for Updates, Release Notes, About
 
 Sign-in/SSO popups open in an in-app window that shares cookies with the main
-webview, so you can authenticate without losing the session. Slack's
-browser-to-desktop `slack://` handoff targets the official client's proprietary
-login flow, which Slackinux deliberately does not claim or override.
+webview, so you can authenticate without losing the session. Browser sign-in
+can return through Slack's `slack://` handoff: Slackinux registers itself as the
+Linux handler and safely opens workspace and channel callbacks in the webview.
 
 ---
 
@@ -249,8 +267,12 @@ with `scripts/check-version-consistency.sh` (also run in CI).
 
 ## Troubleshooting
 
-- **Blank window on launch** — check `RUST_LOG=debug`; the bootstrap page has a
-  30s timeout and logs before navigating to Slack.
+- **Blank window on launch** — AppImage rendering uses compatibility-aware
+  hardware acceleration. A failed or stuck load returns to a visible retry
+  screen; use `RUST_LOG=debug` for diagnostics.
+- **Browser says no app can open `slack://`** — reinstall the current AppImage
+  with `install.sh`, or launch the current Slackinux once so it registers the
+  callback handler for your user account.
 - **External sites open in the browser** — only main-frame navigations open
   externally; third-party iframes inside Slack (analytics, SSO) stay in-app.
 - **Calls don't work** — WebRTC needs PipeWire and the desktop portal; the
