@@ -98,13 +98,16 @@ jobs:
         run: |
           checksum_dir="$(mktemp -d)"
           gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
             --pattern '*.AppImage' \
             --pattern '*.deb' \
             --pattern '*.rpm' \
             --dir "$checksum_dir"
           cd "$checksum_dir"
           sha256sum *.AppImage *.deb *.rpm > SHA256SUMS
-          gh release upload "$RELEASE_TAG" SHA256SUMS --clobber
+          gh release upload "$RELEASE_TAG" SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
 
       # tauri-action writes GitHub API asset URLs into latest.json. Those URLs
       # can return 403 to unauthenticated desktop clients, so publish stable,
@@ -115,11 +118,14 @@ jobs:
         run: |
           release_dir="$(mktemp -d)"
           gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
             --pattern latest.json \
             --dir "$release_dir"
           # The releases/tags API returns 404 for drafts. `gh release view`
           # resolves draft tags and exposes each asset's API URL.
-          gh release view "$RELEASE_TAG" --json assets \
+          gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json assets \
             > "$release_dir/release.json"
 
           base_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/"
@@ -138,5 +144,6 @@ jobs:
             "$release_dir/latest.json" \
             > /dev/null
           gh release upload "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
             "$release_dir/latest.json" \
             --clobber
