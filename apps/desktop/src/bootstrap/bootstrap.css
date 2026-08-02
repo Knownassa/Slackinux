@@ -68,3 +68,18 @@ p {
   outline: 3px solid #36c5f0;
   outline-offset: 3px;
 }
+
+@media (prefers-color-scheme: light) {
+  body {
+    background: #f8f7f8;
+    color: #1d1c1d;
+  }
+
+  p {
+    color: #5b565c;
+  }
+
+  .spinner {
+    color: #611f69;
+  }
+}

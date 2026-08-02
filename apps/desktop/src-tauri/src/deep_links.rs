@@ -12,6 +12,12 @@ pub fn ensure_linux_handler() -> Result<(), String> {
         .ok_or_else(|| "HOME and XDG_DATA_HOME are unavailable".to_string())?;
     let applications = data_home.join("applications");
     std::fs::create_dir_all(&applications).map_err(|error| error.to_string())?;
+    let icon_directory = data_home.join("icons/hicolor/512x512/apps");
+    std::fs::create_dir_all(&icon_directory).map_err(|error| error.to_string())?;
+    write_atomic(
+        &icon_directory.join("slackinux.png"),
+        include_bytes!("../icons/512x512.png"),
+    )?;
 
     let executable = std::env::var_os("APPIMAGE")
         .map(std::path::PathBuf::from)
@@ -24,26 +30,68 @@ pub fn ensure_linux_handler() -> Result<(), String> {
     let mut desktop = String::new();
     writeln!(desktop, "[Desktop Entry]").unwrap();
     writeln!(desktop, "Type=Application").unwrap();
-    writeln!(desktop, "Name=Slackinux URL Handler").unwrap();
-    writeln!(desktop, "NoDisplay=true").unwrap();
-    writeln!(desktop, "Exec=\"{escaped}\" %u").unwrap();
+    writeln!(desktop, "Name=Slackinux").unwrap();
+    writeln!(
+        desktop,
+        "Comment=An unofficial Linux desktop shell for Slack Web"
+    )
+    .unwrap();
+    writeln!(desktop, "Exec=\"{escaped}\" %U").unwrap();
+    writeln!(desktop, "Icon=slackinux").unwrap();
+    writeln!(desktop, "Categories=Network;InstantMessaging;").unwrap();
     writeln!(desktop, "MimeType=x-scheme-handler/slack;").unwrap();
     writeln!(desktop, "Terminal=false").unwrap();
+    writeln!(desktop, "StartupNotify=true").unwrap();
 
-    let handler = applications.join("slackinux-handler.desktop");
+    // Keep a single stable handler name. Registering the process discovered by
+    // Tauri is unsafe for the AppImage host-runtime path because current_exe()
+    // can be the dynamic loader used for re-execution rather than Slackinux.
+    let handler_name = "com.slackinux.desktop";
+    let handler = applications.join(handler_name);
     write_atomic(&handler, desktop.as_bytes())?;
 
+    // Clean up exact handler names produced by older releases. They otherwise
+    // remain candidates in browser "Open with" dialogs indefinitely.
+    for legacy in [
+        "slackinux-handler.desktop",
+        "ld-linux-x86-64.so.2-handler.desktop",
+        "ld-linux.so.2-handler.desktop",
+    ] {
+        let _ = std::fs::remove_file(applications.join(legacy));
+    }
+    if let Ok(entries) = std::fs::read_dir(&applications) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("slackinux_") && name.ends_with("_amd64.desktop") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    let _ = std::process::Command::new("update-desktop-database")
+        .arg(&applications)
+        .status();
+    let _ = std::process::Command::new("gtk-update-icon-cache")
+        .args(["-f", "-t"])
+        .arg(data_home.join("icons/hicolor"))
+        .status();
+
     let status = std::process::Command::new("xdg-mime")
-        .args([
-            "default",
-            "slackinux-handler.desktop",
-            "x-scheme-handler/slack",
-        ])
+        .args(["default", handler_name, "x-scheme-handler/slack"])
         .status();
     match status {
         Ok(status) if status.success() => Ok(()),
-        Ok(status) => Err(format!("xdg-mime exited with {status}")),
-        Err(error) => Err(format!("could not run xdg-mime: {error}")),
+        _ => {
+            let gio = std::process::Command::new("gio")
+                .args(["mime", "x-scheme-handler/slack", handler_name])
+                .status();
+            match gio {
+                Ok(status) if status.success() => Ok(()),
+                Ok(status) => Err(format!("could not set the Slack handler (gio: {status})")),
+                Err(error) => Err(format!("could not set the Slack handler: {error}")),
+            }
+        }
     }
 }
 
@@ -54,8 +102,8 @@ fn write_atomic(path: &std::path::Path, content: &[u8]) -> Result<(), String> {
     std::fs::rename(&temporary, path).map_err(|error| error.to_string())
 }
 
-/// Finds the first Slack callback passed by a desktop launcher or a second
-/// process and converts it to a safe Slack Web destination.
+/// Finds the first ordinary Slack deep link passed by a desktop launcher or a
+/// second process and converts it to a safe Slack Web destination.
 pub fn slack_url_from_args(args: &[String]) -> Option<Url> {
     args.iter().find_map(|arg| slack_deep_link_to_web(arg))
 }
@@ -63,6 +111,17 @@ pub fn slack_url_from_args(args: &[String]) -> Option<Url> {
 pub fn slack_deep_link_to_web(value: &str) -> Option<Url> {
     let link = Url::parse(value).ok()?;
     if link.scheme() != "slack" {
+        return None;
+    }
+
+    // One-time authentication callbacks are not ordinary workspace links.
+    // Slackinux deliberately does not consume or redeem them; authentication
+    // happens inside the isolated webview.
+    if link
+        .host_str()
+        .is_some_and(|host| host.eq_ignore_ascii_case("login-v2"))
+        || link.path().contains("/magic-login/")
+    {
         return None;
     }
 
@@ -94,6 +153,20 @@ pub fn slack_deep_link_to_web(value: &str) -> Option<Url> {
         _ => "https://app.slack.com/client".to_string(),
     };
     Url::parse(&destination).ok()
+}
+
+pub fn redact_sensitive_url(value: &str) -> String {
+    let Ok(mut url) = Url::parse(value) else {
+        return value.to_string();
+    };
+    let contains_secret = url.query_pairs().any(|(key, _)| {
+        let key = key.to_ascii_lowercase();
+        key.contains("token") || key == "code" || key.ends_with("_code") || key.contains("secret")
+    });
+    if contains_secret {
+        url.set_query(Some("redacted"));
+    }
+    url.into()
 }
 
 fn safe_slack_redirect(value: &str) -> Option<Url> {
@@ -157,5 +230,25 @@ mod tests {
     fn ignores_unrelated_arguments() {
         assert!(slack_deep_link_to_web("--help").is_none());
         assert!(slack_deep_link_to_web("https://example.com").is_none());
+    }
+
+    #[test]
+    fn ignores_private_authentication_callbacks() {
+        assert!(slack_deep_link_to_web(
+            "slack://open/T12345678/magic-login/AbCdEf123456?host=slack.com"
+        )
+        .is_none());
+        assert!(slack_deep_link_to_web(
+            "slack://login-v2?0.host=slack.com&0.tokens=z-app-T12345678-AbCdEf123456"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn redacts_sso_codes_from_logs() {
+        assert_eq!(
+            redact_sensitive_url("https://idp.example/callback?code=secret-value&state=ok"),
+            "https://idp.example/callback?redacted"
+        );
     }
 }

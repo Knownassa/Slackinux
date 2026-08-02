@@ -9,7 +9,11 @@ pub enum NavigationDecision {
 
 pub fn classify_url(url: &Url) -> NavigationDecision {
     if url.scheme() == "tauri" {
-        return NavigationDecision::AllowInternal;
+        return if matches!(url.host_str(), Some("localhost" | "tauri.localhost")) {
+            NavigationDecision::AllowInternal
+        } else {
+            NavigationDecision::Deny
+        };
     }
 
     let host = match url.host_str() {
@@ -26,16 +30,22 @@ pub fn classify_url(url: &Url) -> NavigationDecision {
 
     let host_lower = host.to_lowercase();
 
-    if host_lower == "localhost" || host_lower == "tauri.localhost" {
+    if matches!(url.scheme(), "http" | "https")
+        && (host_lower == "localhost" || host_lower == "tauri.localhost")
+    {
         return NavigationDecision::AllowInternal;
     }
 
-    if host_lower == "app.slack.com"
+    let is_slack = host_lower == "app.slack.com"
         || host_lower.ends_with(".slack.com")
         || host_lower == "slack.com"
-        || host_lower == "www.slack.com"
-    {
-        return NavigationDecision::AllowInternal;
+        || host_lower == "www.slack.com";
+    if is_slack {
+        return if url.scheme() == "https" {
+            NavigationDecision::AllowInternal
+        } else {
+            NavigationDecision::Deny
+        };
     }
 
     match url.scheme() {
@@ -126,6 +136,18 @@ mod tests {
     fn allows_tauri_protocol() {
         let url = Url::parse("tauri://localhost/bootstrap/index.html").unwrap();
         assert_eq!(classify_url(&url), NavigationDecision::AllowInternal);
+    }
+
+    #[test]
+    fn denies_untrusted_tauri_protocol_host() {
+        let url = Url::parse("tauri://evil.example/bootstrap/index.html").unwrap();
+        assert_eq!(classify_url(&url), NavigationDecision::Deny);
+    }
+
+    #[test]
+    fn denies_insecure_slack_origin() {
+        let url = Url::parse("http://app.slack.com/client").unwrap();
+        assert_eq!(classify_url(&url), NavigationDecision::Deny);
     }
 
     #[test]

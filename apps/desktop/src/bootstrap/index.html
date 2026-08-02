@@ -8,8 +8,8 @@
   </head>
   <body>
     <div id="app">
-      <div id="loading-state">
-        <svg class="spinner" viewBox="0 0 24 24" width="48" height="48">
+      <div id="loading-state" role="status" aria-live="polite">
+        <svg class="spinner" viewBox="0 0 24 24" width="48" height="48" aria-hidden="true">
           <circle
             cx="12" cy="12" r="10"
             fill="none"
@@ -20,9 +20,9 @@
           />
         </svg>
         <h1>Slackinux</h1>
-        <p>Loading Slack…</p>
+        <p id="loading-message">Loading Slack…</p>
       </div>
-      <div id="error-state" style="display: none">
+      <div id="error-state" role="alert" aria-live="assertive" style="display: none">
         <h1>Could not load Slack</h1>
         <p id="error-message"></p>
         <button id="retry-button" type="button">Try again</button>
