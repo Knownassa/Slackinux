@@ -2,6 +2,23 @@
 
 All notable changes to Slackinux are documented here.
 
+## Unreleased
+
+- Replaced all launcher, package, tray, repository, and branding icons with the
+  latest Slackinux application logo.
+- Fixed AppImage blank screens returning after an in-app update by using
+  `APPDIR` as the host-WebKit re-exec guard and preferring an installed host
+  WebKitGTK 4.1 runtime on all distributions.
+- Added `%U` to packaged launchers and a self-healing `slack://` desktop
+  handler for ordinary workspace and channel deep links.
+- Removed the unreliable external-browser sign-in action. Slackinux now uses
+  only its cookie-sharing in-app sign-in and SSO popup flow.
+- Added Slack-origin-restricted camera and microphone permissions and bundled
+  AppImage media frameworks; active WebKit audio now postpones updates, while
+  Huddles remain experimental.
+- Made settings and AppImage installation writes atomic, added release SHA-256
+  verification, and fixed manually dispatched release tag resolution.
+
 ## 0.2.3 - 2026-08-02
 
 - Added **Help → Diagnostics** actions to open persistent rotating logs, copy a

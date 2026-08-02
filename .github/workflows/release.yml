@@ -59,6 +59,17 @@ jobs:
       - name: Check version consistency
         run: bash scripts/check-version-consistency.sh
 
+      - name: Resolve and validate release tag
+        shell: bash
+        run: |
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' apps/desktop/src-tauri/Cargo.toml | head -1)"
+          release_tag="v$version"
+          if [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF_NAME" != "$release_tag" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match source version $release_tag" >&2
+            exit 1
+          fi
+          echo "RELEASE_TAG=$release_tag" >> "$GITHUB_ENV"
+
       - name: Build and publish signed installers
         uses: tauri-apps/tauri-action@v1
         env:
@@ -81,6 +92,20 @@ jobs:
           uploadUpdaterJson: true
           uploadUpdaterSignatures: true
 
+      - name: Publish SHA-256 checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          checksum_dir="$(mktemp -d)"
+          gh release download "$RELEASE_TAG" \
+            --pattern '*.AppImage' \
+            --pattern '*.deb' \
+            --pattern '*.rpm' \
+            --dir "$checksum_dir"
+          cd "$checksum_dir"
+          sha256sum *.AppImage *.deb *.rpm > SHA256SUMS
+          gh release upload "$RELEASE_TAG" SHA256SUMS --clobber
+
       # tauri-action writes GitHub API asset URLs into latest.json. Those URLs
       # can return 403 to unauthenticated desktop clients, so publish stable,
       # public release-download URLs instead.
@@ -89,15 +114,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           release_dir="$(mktemp -d)"
-          gh release download "$GITHUB_REF_NAME" \
+          gh release download "$RELEASE_TAG" \
             --pattern latest.json \
             --dir "$release_dir"
           # The releases/tags API returns 404 for drafts. `gh release view`
           # resolves draft tags and exposes each asset's API URL.
-          gh release view "$GITHUB_REF_NAME" --json assets \
+          gh release view "$RELEASE_TAG" --json assets \
             > "$release_dir/release.json"
 
-          base_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/"
+          base_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/"
           jq \
             --slurpfile release "$release_dir/release.json" \
             --arg base_url "$base_url" \
@@ -112,6 +137,6 @@ jobs:
             'all(.platforms[]; .url | startswith($base_url))' \
             "$release_dir/latest.json" \
             > /dev/null
-          gh release upload "$GITHUB_REF_NAME" \
+          gh release upload "$RELEASE_TAG" \
             "$release_dir/latest.json" \
             --clobber

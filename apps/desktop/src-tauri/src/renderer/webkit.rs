@@ -35,7 +35,7 @@ impl WebKitRenderer {
         self.enable_spellcheck();
         self.setup_navigation_policy(app_handle.clone());
         self.setup_load_recovery();
-        self.setup_permission_logging();
+        self.setup_permissions();
         self.setup_crash_recovery();
         self.setup_notifications(notif_mgr, app_handle);
         self.setup_title_tracking(update_tooltip);
@@ -260,18 +260,38 @@ impl WebKitRenderer {
     }
 
     #[cfg(target_os = "linux")]
-    fn setup_permission_logging(&self) {
+    fn setup_permissions(&self) {
         let _ = self.window.with_webview(|pw| {
             use webkit2gtk::glib::Cast;
-            use webkit2gtk::{NotificationPermissionRequest, PermissionRequestExt, WebViewExt};
+            use webkit2gtk::{
+                NotificationPermissionRequest, PermissionRequestExt, UserMediaPermissionRequest,
+                WebViewExt,
+            };
             let wk = pw.inner();
-            wk.connect_permission_request(|_webview, request| {
+            wk.connect_permission_request(|webview, request| {
                 if request
                     .downcast_ref::<NotificationPermissionRequest>()
                     .is_some()
                 {
                     request.allow();
                     info!("notification permission allowed");
+                    true
+                } else if request
+                    .downcast_ref::<UserMediaPermissionRequest>()
+                    .is_some()
+                {
+                    let trusted = webview
+                        .uri()
+                        .and_then(|value| url::Url::parse(value.as_str()).ok())
+                        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+                        .is_some_and(|host| host == "slack.com" || host.ends_with(".slack.com"));
+                    if trusted {
+                        request.allow();
+                        info!("camera/microphone permission allowed for Slack");
+                    } else {
+                        request.deny();
+                        warn!("camera/microphone permission denied for an untrusted origin");
+                    }
                     true
                 } else {
                     info!("permission request: unhandled type");
@@ -430,5 +450,26 @@ impl SlackRenderer for WebKitRenderer {
             });
         }
         Ok(())
+    }
+
+    fn media_playing(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            let playing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let result = playing.clone();
+            let _ = self.window.with_webview(move |pw| {
+                use webkit2gtk::WebViewExt;
+                result.store(
+                    pw.inner().is_playing_audio(),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            });
+            playing.load(std::sync::atomic::Ordering::Relaxed)
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
     }
 }

@@ -261,7 +261,7 @@ fn prompt_for_update(
                 ))
                 .show(move |download| {
                     if download {
-                        if media_capture_active() {
+                        if media_capture_active(&install_app) {
                             show_info(
                                 &install_app,
                                 "A Huddle or screen share appears to be active, so the update \
@@ -374,14 +374,11 @@ fn open_release_page(app: &tauri::AppHandle) {
     }
 }
 
-/// True while a Huddle call or screen share is active. Installation is
-/// postponed during media so an active session is not interrupted.
-///
-/// This is a placeholder hook: Slack does not currently expose an active-call
-/// signal to the shell. A future renderer integration (for example observing
-/// WebKit media activity) can switch this to a real check.
-fn media_capture_active() -> bool {
-    false
+/// Uses WebKit's live audio state as the safest available Huddle signal. This
+/// intentionally favors postponing an update over interrupting active media.
+fn media_capture_active(app: &tauri::AppHandle) -> bool {
+    app.try_state::<AppState>()
+        .is_some_and(|state| state.renderer.media_playing())
 }
 
 fn current_settings(app: &tauri::AppHandle) -> Settings {

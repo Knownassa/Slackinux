@@ -1,0 +1,20 @@
+{
+  "$schema": "./manifest.schema.json",
+  "schemaVersion": 1,
+  "updatedAt": "2026-08-02",
+  "slack": {
+    "minimumChromeMajor": 137,
+    "minimumFirefoxMajor": 139,
+    "huddleBrowsers": ["Chrome", "Firefox"]
+  },
+  "renderers": {
+    "webkitgtk": {
+      "status": "experimental",
+      "messaging": "supported",
+      "huddles": "experimental"
+    },
+    "cef": {
+      "status": "unsupported"
+    }
+  }
+}
