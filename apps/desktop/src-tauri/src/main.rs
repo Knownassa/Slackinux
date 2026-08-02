@@ -9,6 +9,8 @@ mod frame;
 mod gpu;
 mod navigation;
 mod notifications;
+#[cfg(target_os = "linux")]
+mod permissions;
 mod renderer;
 mod runtime;
 mod settings;
@@ -38,6 +40,10 @@ struct AppState {
     theme_preference: Arc<std::sync::Mutex<settings::ThemePreference>>,
     auto_check_updates: Arc<AtomicBool>,
     last_update_check_unix: Arc<AtomicI64>,
+    #[cfg(target_os = "linux")]
+    permission_broker: Arc<permissions::PermissionBroker>,
+    #[cfg(target_os = "linux")]
+    media_activity: Arc<renderer::webkit::MediaActivity>,
 }
 
 /// Ordinary workspace/channel links can race the final part of application
@@ -238,6 +244,13 @@ fn main() -> AppResult<()> {
             ));
 
             #[cfg(target_os = "linux")]
+            let permission_broker = Arc::new(permissions::PermissionBroker::load(&data_dir));
+
+            #[cfg(target_os = "linux")]
+            let media_activity =
+                Arc::new(renderer::webkit::MediaActivity::default());
+
+            #[cfg(target_os = "linux")]
             {
                 let tt = tray.clone();
                 let handle = app.handle().clone();
@@ -254,6 +267,8 @@ fn main() -> AppResult<()> {
                     },
                     notif_mgr.clone(),
                     handle,
+                    permission_broker.clone(),
+                    media_activity.clone(),
                 );
             }
 
@@ -271,6 +286,10 @@ fn main() -> AppResult<()> {
                 last_update_check_unix: Arc::new(AtomicI64::new(
                     user_settings.last_update_check_unix,
                 )),
+                #[cfg(target_os = "linux")]
+                permission_broker: permission_broker.clone(),
+                #[cfg(target_os = "linux")]
+                media_activity: media_activity.clone(),
             });
 
             // --- App menu: Slack-desktop-style (File/Edit/View/History/Window/
@@ -421,6 +440,18 @@ fn main() -> AppResult<()> {
                     .build()?
             };
 
+            #[cfg(target_os = "linux")]
+            let media_menu = {
+                let reset_media = MenuItemBuilder::with_id(
+                    "reset_media_permissions",
+                    "Reset Media & Notification Permissions",
+                )
+                .build(app)?;
+                SubmenuBuilder::with_id(app, "media", "Media")
+                    .item(&reset_media)
+                    .build()?
+            };
+
             let file_menu = SubmenuBuilder::new(app, "File")
                 .item(&quit_item)
                 .build()?;
@@ -487,6 +518,8 @@ fn main() -> AppResult<()> {
             if let Some(menu) = app.menu() {
                 #[cfg(target_os = "linux")]
                 menu.append(&graphics_menu)?;
+                #[cfg(target_os = "linux")]
+                menu.append(&media_menu)?;
                 menu.append(&account_menu)?;
             }
 
@@ -619,6 +652,21 @@ fn main() -> AppResult<()> {
                     let state = app.state::<AppState>();
                     let _ = state.renderer.clear_cache();
                     restart_app(app);
+                }
+                "reset_media_permissions" => {
+                    use tauri_plugin_dialog::DialogExt;
+                    let state = app.state::<AppState>();
+                    state.permission_broker.reset_all();
+                    info!("media and notification permissions reset");
+                    app.dialog()
+                        .message(
+                            "All camera, microphone, screen-sharing and notification \
+                             permissions have been reset.\n\nSlackinux will ask again the \
+                             next time they are requested.",
+                        )
+                        .title("Slackinux — Media Permissions")
+                        .kind(tauri_plugin_dialog::MessageDialogKind::Info)
+                        .show(|_| {});
                 }
                 "gpu_auto"
                 | "gpu_efficient"

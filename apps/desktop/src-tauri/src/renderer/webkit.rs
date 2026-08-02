@@ -49,6 +49,8 @@ impl WebKitRenderer {
         update_tooltip: F,
         notif_mgr: Arc<NotificationManager>,
         app_handle: tauri::AppHandle,
+        permission_broker: Arc<crate::permissions::PermissionBroker>,
+        media_activity: Arc<MediaActivity>,
     ) where
         F: Fn(&str) + Send + 'static,
     {
@@ -56,7 +58,7 @@ impl WebKitRenderer {
         self.enable_spellcheck();
         self.setup_navigation_policy(app_handle.clone());
         self.setup_load_recovery();
-        self.setup_permissions();
+        self.setup_permissions(permission_broker, media_activity);
         self.setup_crash_recovery(app_handle.clone());
         self.setup_notifications(notif_mgr, app_handle);
         self.setup_title_tracking(update_tooltip);
@@ -384,38 +386,61 @@ impl WebKitRenderer {
     }
 
     #[cfg(target_os = "linux")]
-    fn setup_permissions(&self) {
-        let _ = self.window.with_webview(|pw| {
+    fn setup_permissions(
+        &self,
+        broker: Arc<crate::permissions::PermissionBroker>,
+        activity: Arc<MediaActivity>,
+    ) {
+        self.setup_media_indicators(activity);
+        let _ = self.window.with_webview(move |pw| {
+            use gtk::prelude::*;
             use webkit2gtk::glib::Cast;
             use webkit2gtk::{
                 NotificationPermissionRequest, PermissionRequestExt, UserMediaPermissionRequest,
                 WebViewExt,
             };
             let wk = pw.inner();
-            wk.connect_permission_request(|webview, request| {
+            wk.connect_permission_request(move |webview, request| {
+                let origin = webview
+                    .uri()
+                    .and_then(|value| url::Url::parse(value.as_str()).ok())
+                    .and_then(|url| url.host_str().map(str::to_ascii_lowercase));
+                let Some(host) = origin else {
+                    // No origin means we cannot authorize media access.
+                    request.deny();
+                    warn!("permission request ignored: no origin available");
+                    return true;
+                };
+
                 if request
                     .downcast_ref::<NotificationPermissionRequest>()
                     .is_some()
                 {
-                    request.allow();
-                    info!("notification permission allowed");
+                    let decision =
+                        broker.decide(crate::permissions::MediaKind::Notifications, &host);
+                    apply_decision(
+                        &broker,
+                        crate::permissions::MediaKind::Notifications,
+                        &host,
+                        decision,
+                        request,
+                        webview.toplevel().as_ref(),
+                    );
                     true
                 } else if request
                     .downcast_ref::<UserMediaPermissionRequest>()
                     .is_some()
                 {
-                    let trusted = webview
-                        .uri()
-                        .and_then(|value| url::Url::parse(value.as_str()).ok())
-                        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
-                        .is_some_and(|host| host == "slack.com" || host.ends_with(".slack.com"));
-                    if trusted {
-                        request.allow();
-                        info!("camera/microphone permission allowed for Slack");
-                    } else {
-                        request.deny();
-                        warn!("camera/microphone permission denied for an untrusted origin");
-                    }
+                    let kind = user_media_kind(request);
+                    let decision = broker.decide(kind, &host);
+                    apply_decision(
+                        &broker,
+                        kind,
+                        &host,
+                        decision,
+                        request,
+                        webview.toplevel().as_ref(),
+                    );
                     true
                 } else {
                     info!("permission request: unhandled type");
@@ -530,6 +555,162 @@ impl WebKitRenderer {
                     download.connect_finished(|_| info!("download finished"));
                 });
             }
+        });
+    }
+}
+
+/// Classifies a `UserMediaPermissionRequest` as microphone, camera, or screen
+/// sharing. WebKitGTK 2.34+ reports the display-device flag separately from
+/// the audio/video flags, so screen capture can be brokered on its own.
+#[cfg(target_os = "linux")]
+fn user_media_kind(request: &webkit2gtk::PermissionRequest) -> crate::permissions::MediaKind {
+    use webkit2gtk::glib::translate::ToGlibPtr;
+    use webkit2gtk::glib::Cast;
+    use webkit2gtk::{UserMediaPermissionRequest, UserMediaPermissionRequestExt};
+    if let Some(media) = request.downcast_ref::<UserMediaPermissionRequest>() {
+        // The safe binding only exposes audio/video flags; the display flag
+        // requires the raw symbol (v2_34), which the pinned crate gates behind
+        // the `v2_34` feature enabled in Cargo.toml.
+        let is_display = unsafe {
+            webkit2gtk::ffi::webkit_user_media_permission_is_for_display_device(
+                media.to_glib_none().0,
+            ) != 0
+        };
+        if is_display {
+            return crate::permissions::MediaKind::ScreenShare;
+        }
+        if media.is_for_audio_device() {
+            return crate::permissions::MediaKind::Microphone;
+        }
+        return crate::permissions::MediaKind::Camera;
+    }
+    crate::permissions::MediaKind::Camera
+}
+
+/// Applies a broker decision to a live WebKitGTK permission request, prompting
+/// the user when the broker asks. The decision is recorded before the request
+/// is allowed/denied so subsequent requests honor it.
+#[cfg(target_os = "linux")]
+fn apply_decision(
+    broker: &crate::permissions::PermissionBroker,
+    kind: crate::permissions::MediaKind,
+    host: &str,
+    decision: crate::permissions::PermissionDecision,
+    request: &webkit2gtk::PermissionRequest,
+    parent: Option<&gtk::Widget>,
+) {
+    use webkit2gtk::glib::Cast;
+    use webkit2gtk::PermissionRequestExt;
+
+    let decision = match decision {
+        crate::permissions::PermissionDecision::AskEveryTime => {
+            let parent_window = parent
+                .and_then(|widget| widget.downcast_ref::<gtk::Window>())
+                .cloned();
+            let choice = crate::permissions::prompt_user(kind, host, parent_window.as_ref());
+            broker.record(kind, host, choice);
+            choice
+        }
+        other => other,
+    };
+
+    match decision {
+        crate::permissions::PermissionDecision::AlwaysAllow
+        | crate::permissions::PermissionDecision::AllowOnce => {
+            request.allow();
+            info!("permission allowed: {} for {}", kind.label(), host);
+        }
+        crate::permissions::PermissionDecision::Block
+        | crate::permissions::PermissionDecision::AskEveryTime => {
+            request.deny();
+            warn!(
+                "permission denied: {} for {} ({decision:?})",
+                kind.label(),
+                host
+            );
+        }
+    }
+}
+
+/// Live capture state for the three media sources Slackinux brokers. Updated
+/// from WebKitGTK capture-state notifications so the UI can show an indicator
+/// without polling.
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+pub struct MediaActivity {
+    microphone: std::sync::atomic::AtomicBool,
+    camera: std::sync::atomic::AtomicBool,
+    screen_share: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(target_os = "linux")]
+impl MediaActivity {
+    /// Snapshot of which media sources are currently capturing.
+    pub fn active(&self) -> CaptureActive {
+        CaptureActive {
+            microphone: self.microphone.load(std::sync::atomic::Ordering::Relaxed),
+            camera: self.camera.load(std::sync::atomic::Ordering::Relaxed),
+            screen_share: self.screen_share.load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+}
+
+/// Snapshot returned by [`MediaActivity::active`].
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CaptureActive {
+    pub microphone: bool,
+    pub camera: bool,
+    pub screen_share: bool,
+}
+
+impl CaptureActive {
+    /// `true` when any media source is capturing (e.g. during a Huddle).
+    pub fn any(self) -> bool {
+        self.microphone || self.camera || self.screen_share
+    }
+}
+
+impl WebKitRenderer {
+    /// Enables live capture-state indicators on the main webview. Call before
+    /// the window is shown so the first state change is observed.
+    #[cfg(target_os = "linux")]
+    pub fn setup_media_indicators(&self, activity: Arc<MediaActivity>) {
+        let _ = self.window.with_webview(move |pw| {
+            use webkit2gtk::MediaCaptureState;
+            use webkit2gtk::WebViewExt;
+            let wk = pw.inner();
+            let mic = activity.clone();
+            wk.connect_microphone_capture_state_notify(move |webview| {
+                let capturing = webview.microphone_capture_state() == MediaCaptureState::Active;
+                mic.microphone
+                    .store(capturing, std::sync::atomic::Ordering::Relaxed);
+                info!(
+                    "microphone capture state: {}",
+                    if capturing { "active" } else { "inactive" }
+                );
+            });
+            let cam = activity.clone();
+            wk.connect_camera_capture_state_notify(move |webview| {
+                let capturing = webview.camera_capture_state() == MediaCaptureState::Active;
+                cam.camera
+                    .store(capturing, std::sync::atomic::Ordering::Relaxed);
+                info!(
+                    "camera capture state: {}",
+                    if capturing { "active" } else { "inactive" }
+                );
+            });
+            let screen = activity.clone();
+            wk.connect_display_capture_state_notify(move |webview| {
+                let capturing = webview.display_capture_state() == MediaCaptureState::Active;
+                screen
+                    .screen_share
+                    .store(capturing, std::sync::atomic::Ordering::Relaxed);
+                info!(
+                    "screen capture state: {}",
+                    if capturing { "active" } else { "inactive" }
+                );
+            });
         });
     }
 }

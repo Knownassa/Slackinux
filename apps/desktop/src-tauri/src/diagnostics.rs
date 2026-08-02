@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use log::{error, info};
+use tauri::Manager;
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 const LOG_FILE_NAME: &str = "slackinux.log";
@@ -80,7 +81,7 @@ pub fn open_log_folder(app: &tauri::AppHandle) {
 }
 
 pub fn copy_support_report(app: &tauri::AppHandle) {
-    let report = support_report();
+    let report = support_report(app);
     #[cfg(target_os = "linux")]
     {
         let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
@@ -98,7 +99,7 @@ pub fn copy_support_report(app: &tauri::AppHandle) {
 }
 
 pub fn report_issue(app: &tauri::AppHandle) {
-    let url = issue_url(&support_report());
+    let url = issue_url(&support_report(app));
     if let Err(err) = open::that_detached(url.as_str()) {
         error!("could not open the Slackinux issue reporter: {err}");
         app.dialog()
@@ -111,7 +112,7 @@ pub fn report_issue(app: &tauri::AppHandle) {
     }
 }
 
-fn support_report() -> String {
+fn support_report(app: &tauri::AppHandle) -> String {
     let distro = linux_pretty_name().unwrap_or_else(|| "Unknown Linux distribution".into());
     let session = clean_environment_value("XDG_SESSION_TYPE");
     let desktop = clean_environment_value("XDG_CURRENT_DESKTOP");
@@ -133,6 +134,51 @@ fn support_report() -> String {
         }
     };
 
+    let media = {
+        #[cfg(target_os = "linux")]
+        {
+            use crate::permissions::MediaKind;
+            let state = app.state::<crate::AppState>();
+            let capture = state.media_activity.active();
+            let mut lines = format!(
+                "{} | mic={} camera={} screen={}",
+                if capture.any() {
+                    "capturing now"
+                } else {
+                    "not capturing"
+                },
+                capture.microphone,
+                capture.camera,
+                capture.screen_share
+            );
+            let mut any_saved = false;
+            for kind in [
+                MediaKind::Microphone,
+                MediaKind::Camera,
+                MediaKind::ScreenShare,
+                MediaKind::Notifications,
+            ] {
+                let saved = state.permission_broker.managed_hosts(kind).len();
+                if saved == 0 {
+                    continue;
+                }
+                any_saved = true;
+                lines.push_str(&format!(
+                    "\n  saved decisions: {saved} host(s) with a saved {} setting",
+                    kind.label()
+                ));
+            }
+            if !any_saved {
+                lines.push_str("\n  no saved permission decisions (all prompt every time)");
+            }
+            lines
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            "unavailable on this platform".into()
+        }
+    };
+
     format!(
         "Slackinux diagnostics\n\
          - Version: {}\n\
@@ -142,6 +188,7 @@ fn support_report() -> String {
          - Desktop: {}\n\
          - Installation: {}\n\
          - Graphics: {}\n\
+         - Media permissions: {}\n\
          - Log file: {}\n",
         env!("CARGO_PKG_VERSION"),
         distro,
@@ -151,6 +198,7 @@ fn support_report() -> String {
         desktop,
         installation,
         graphics,
+        media,
         LOG_FILE_NAME,
     )
 }
