@@ -8,6 +8,8 @@ mod frame;
 #[cfg(target_os = "linux")]
 mod gpu;
 #[cfg(target_os = "linux")]
+mod huddle_browser;
+#[cfg(target_os = "linux")]
 mod huddles;
 mod navigation;
 mod notifications;
@@ -459,8 +461,15 @@ fn main() -> AppResult<()> {
                     "Reset Media & Notification Permissions",
                 )
                 .build(app)?;
+                let huddle_browser = MenuItemBuilder::with_id(
+                    "open_huddle_in_browser",
+                    "Open Huddle in Browser…",
+                )
+                .build(app)?;
                 SubmenuBuilder::with_id(app, "media", "Media")
                     .item(&reset_media)
+                    .separator()
+                    .item(&huddle_browser)
                     .build()?
             };
 
@@ -684,6 +693,38 @@ fn main() -> AppResult<()> {
                         .title("Slackinux — Media Permissions")
                         .kind(tauri_plugin_dialog::MessageDialogKind::Info)
                         .show(|_| {});
+                }
+                "open_huddle_in_browser" => {
+                    use tauri_plugin_dialog::DialogExt;
+                    match huddle_browser::find_browser() {
+                        Some((browser, kind)) => {
+                            let url = huddle_browser::huddle_launch_url();
+                            info!("opening Huddle in {}: {}", kind.name(), browser.display());
+                            if let Err(error) = huddle_browser::open_in_browser(&browser, &url) {
+                                error!("could not open Huddle in browser: {error}");
+                                app.dialog()
+                                    .message(format!(
+                                        "Could not open the Huddle in {}. Please open \
+                                         https://app.slack.com/huddle/new manually.\n\n{error}",
+                                        kind.name()
+                                    ))
+                                    .title("Slackinux — Huddle")
+                                    .kind(tauri_plugin_dialog::MessageDialogKind::Error)
+                                    .show(|_| {});
+                            }
+                        }
+                        None => {
+                            info!("open Huddle in browser: no supported browser found");
+                            app.dialog()
+                                .message(
+                                    "No supported browser was found on PATH.\n\nInstall \
+                                     Google Chrome, Chromium, or Brave, then try again.",
+                                )
+                                .title("Slackinux — Huddle")
+                                .kind(tauri_plugin_dialog::MessageDialogKind::Error)
+                                .show(|_| {});
+                        }
+                    }
                 }
                 "gpu_auto"
                 | "gpu_efficient"
