@@ -2,9 +2,10 @@
 //!
 //! Tauri AppImages bundle WebKitGTK and GTK. Those libraries can be older than
 //! the host's security-patched runtime or incompatible with a newer graphics
-//! stack. When a compatible host WebKitGTK 4.1 is installed, re-execute without
-//! the bundled library environment. `APPDIR` disappearing is the loop guard;
-//! unlike an inherited marker, it also remains correct after an in-app update.
+//! stack. When a compatible host WebKitGTK 4.1 is installed, re-execute through
+//! the host dynamic loader while inhibiting the packaged binary's RUNPATH.
+//! `APPDIR` disappearing is the loop guard; unlike an inherited marker, it also
+//! remains correct after an in-app update.
 
 #[cfg(target_os = "linux")]
 pub fn prefer_host_webkit_for_appimage() {
@@ -19,10 +20,20 @@ pub fn prefer_host_webkit_for_appimage() {
         return;
     }
 
+    let Some(loader) = host_dynamic_loader() else {
+        eprintln!("Slackinux: host dynamic loader not found; using AppImage runtime");
+        return;
+    };
+
     let Ok(executable) = std::env::current_exe() else {
         return;
     };
-    let mut command = std::process::Command::new(executable);
+    // linuxdeploy adds `$ORIGIN/../lib` to the executable's RUNPATH. Clearing
+    // LD_LIBRARY_PATH alone therefore still loads the bundled WebKitGTK. The
+    // glibc loader's empty inhibit list disables every RPATH/RUNPATH entry for
+    // this execution and lets the normal host library search resolve WebKit.
+    let mut command = std::process::Command::new(loader);
+    command.arg("--inhibit-rpath").arg("").arg(executable);
     command.args(std::env::args_os().skip(1));
     for name in bundled_runtime_variables() {
         command.env_remove(name);
@@ -36,6 +47,21 @@ pub fn prefer_host_webkit_for_appimage() {
     eprintln!("Slackinux: using the host WebKitGTK 4.1 runtime");
     let error = command.exec();
     eprintln!("Slackinux could not start with the host WebKitGTK runtime: {error}");
+}
+
+#[cfg(target_os = "linux")]
+fn host_dynamic_loader() -> Option<&'static str> {
+    const LOADERS: &[&str] = &[
+        "/lib64/ld-linux-x86-64.so.2",
+        "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+        "/usr/lib64/ld-linux-x86-64.so.2",
+        "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+    ];
+
+    LOADERS
+        .iter()
+        .copied()
+        .find(|loader| std::path::Path::new(loader).is_file())
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -85,5 +111,10 @@ mod tests {
     #[test]
     fn bundled_runtime_variables_include_appdir_loop_guard() {
         assert!(bundled_runtime_variables().contains(&"APPDIR"));
+    }
+
+    #[test]
+    fn host_loader_is_available_on_supported_linux_build_hosts() {
+        assert!(host_dynamic_loader().is_some());
     }
 }
