@@ -8,4 +8,5 @@ pub trait SlackRenderer: Send + Sync {
     fn eval(&self, js: &str) -> AppResult<()>;
     fn reload(&self) -> AppResult<()>;
     fn clear_cache(&self) -> AppResult<()>;
+    fn media_playing(&self) -> bool;
 }

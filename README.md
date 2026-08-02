@@ -7,7 +7,7 @@
 <img src="SlackinuxAppLogo.png" alt="Slackinux logo" width="160">
 
 An unofficial, resource-conscious desktop shell for Slack Web,<br>
-built with Rust, Tauri 2, and the system WebKitGTK renderer.
+built with Rust, Tauri 2, and WebKitGTK 4.1.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/Knownassa/Slackinux)](https://github.com/Knownassa/Slackinux/releases/latest)
@@ -45,11 +45,11 @@ Slack Web experience and adding desktop integration around it.
 
 | | Slackinux approach |
 |---|---|
-| **Renderer** | System WebKitGTK — no bundled browser engine |
+| **Renderer** | Host WebKitGTK 4.1 when available; AppImage runtime fallback |
 | **Desktop integration** | Tray, unread count, notifications, shortcuts, downloads, and custom window chrome |
 | **Updates** | Signed GitHub releases with in-app notification and verification |
 | **Security boundary** | Remote Slack content receives zero Tauri host capabilities |
-| **Distribution** | AppImage for portable use and `.deb` for Debian/Ubuntu |
+| **Distribution** | AppImage, Debian/Ubuntu `.deb`, and Fedora/RHEL/openSUSE `.rpm` |
 
 Slackinux does not reimplement Slack or use unofficial APIs. It provides a
 focused native Linux shell around the official web application.
@@ -62,7 +62,7 @@ focused native Linux shell around the official web application.
 |---|---|
 | **Native rendering** | WebKitGTK 4.1 — a fraction of the memory and CPU of Electron |
 | **Zero-IPC security** | The Slack webview has an empty Tauri capability set; remote code cannot reach the host |
-| **WebRTC** | Audio/video calls and screen sharing via PipeWire and the desktop portal |
+| **WebRTC** | Origin-restricted camera/microphone access; Huddles remain experimental |
 | **Native notifications** | Click a notification to focus the window; Do Not Disturb (`Ctrl+D`) |
 | **Signed updates** | GitHub-hosted, signature-verified, install-and-restart from the AppImage |
 | **Tray + unread badge** | Close-to-tray, left-click toggle, pending-message count in the tooltip |
@@ -82,7 +82,8 @@ curl -fsSL https://raw.githubusercontent.com/Knownassa/Slackinux/main/install.sh
 ```
 
 The installer automatically chooses DEB on Debian/Ubuntu, RPM on Fedora/RHEL/
-openSUSE, and a per-user AppImage elsewhere. Download and inspect
+openSUSE, and a per-user AppImage elsewhere. Release packages are downloaded to
+a temporary path, SHA-256 verified, and only then installed. Download and inspect
 [`install.sh`](install.sh) first if you prefer not to pipe a script into a shell.
 Use `sh install.sh --help` to select a package format explicitly, or
 `sh install.sh --dry-run` to verify compatibility without installing anything.
@@ -113,7 +114,7 @@ libraries.
 **Arch-based systems:**
 
 ```bash
-sudo pacman -S webkitgtk-6.0 gtk3
+sudo pacman -S webkit2gtk-4.1 gtk3
 ```
 
 **Debian / Ubuntu:**
@@ -153,6 +154,27 @@ cargo tauri build --bundles rpm
 Artifacts land in `target/release/bundle/`. On Arch-based distros set
 `NO_STRIP=1` to avoid `.relr.dyn` linker errors.
 
+## Compatibility
+
+Slackinux currently publishes x86-64 Linux packages and requires glibc 2.34 or
+newer. Ubuntu 22.04/24.04 and Debian 12+ are the primary supported targets.
+Fedora, RHEL 9+, openSUSE, Arch, CachyOS, Manjaro, and EndeavourOS are supported
+through the RPM or AppImage paths but receive less CI coverage. Alpine/musl,
+32-bit Linux, ARM/aarch64, Windows, macOS, and mobile devices are not currently
+supported.
+
+The AppImage prefers a host `libwebkit2gtk-4.1.so.0` when present, which keeps
+the browser engine aligned with distribution security updates and avoids mixed
+graphics stacks. It falls back to its bundled runtime when the host library is
+not installed. Keeping the OS and WebKitGTK packages updated is strongly
+recommended.
+
+Messaging, files, notifications, themes, in-app sign-in, and normal Slack
+navigation are the supported core. Camera and microphone requests are
+allowed only while the top-level page is on a Slack-owned HTTPS origin. Slack
+does not officially list WebKitGTK as a supported Huddles browser, so audio,
+video, and screen sharing should be treated as experimental.
+
 ---
 
 ## Usage
@@ -175,7 +197,7 @@ tooltip.
 Use **Theme → System**, **Light**, or **Dark** to change the native top panel
 and Slack's preferred color scheme. The selection is saved for future launches.
 
-- **Account** — sign in, open Slack in your browser, Do Not Disturb, clear cache & restart
+- **Account** — sign in, Do Not Disturb, clear cache & restart
 - **View** — zoom and reload controls
 - **Window** — minimize, maximize/restore
 - **Help** — Check for Updates, Release Notes, Diagnostics, About
@@ -184,10 +206,12 @@ Use **Help → Diagnostics** to open the rotating log folder, copy a privacy-saf
 system summary, or open a pre-filled GitHub bug report. Slackinux never adds
 Slack messages, cookies, tokens, or workspace content to the copied summary.
 
-Sign-in/SSO popups open in an in-app window that shares cookies with the main
-webview, so you can authenticate without losing the session. Browser sign-in
-can return through Slack's `slack://` handoff: Slackinux registers itself as the
-Linux handler and safely opens workspace and channel callbacks in the webview.
+Sign-in and SSO popups open in an in-app window that shares cookies with the
+main webview, so authentication is retained by Slackinux. System-browser
+authentication is intentionally not offered: browser cookies are isolated from
+WebKitGTK, and Slack does not publish a Linux API for third-party clients to
+redeem its proprietary desktop `magic-login` handoff. Slackinux still registers
+`slack://` for ordinary workspace and channel deep links after authentication.
 
 ---
 
@@ -262,8 +286,8 @@ with `scripts/check-version-consistency.sh` (also run in CI).
 
 - The Slack webview has **zero Tauri capabilities**. Its only paths to the
   system are the ones a normal browser gives a website — native
-  notifications, downloads, and audio/video devices — all routed through
-  WebKitGTK's own permission prompts.
+  notifications, downloads, and audio/video devices. Camera and microphone
+  access is denied unless the top-level page is a Slack-owned HTTPS origin.
 - Navigations are classified at the WebKitGTK policy level: main-frame Slack
   pages load in-app, external links open in your browser, third-party
   sub-frames (analytics, SSO) load normally, everything else is denied.
@@ -276,19 +300,21 @@ with `scripts/check-version-consistency.sh` (also run in CI).
 
 - **Blank window on launch** — AppImage rendering uses compatibility-aware
   hardware acceleration and automatically switches to software compositing on
-  Wayland/NVIDIA systems where WebKit's EGL process is unsafe. On Arch-family
-  distributions, the AppImage uses the host WebKitGTK instead of mixing its
-  Ubuntu runtime with newer Mesa/NVIDIA libraries. A failed or stuck load
+  Wayland/NVIDIA systems where WebKit's EGL process is unsafe. When WebKitGTK
+  4.1 is installed on the host, the AppImage uses it instead of mixing its
+  bundled runtime with the host graphics stack. A failed or stuck load
   returns to a visible retry screen; use **Help → Diagnostics → Open Log
   Folder** to find the current and previous logs. Start with `RUST_LOG=debug`
   when more detail is needed.
-- **Browser says no app can open `slack://`** — reinstall the current AppImage
-  with `install.sh`, or launch the current Slackinux once so it registers the
-  callback handler for your user account.
+- **Browser says no app can open a normal `slack://` workspace/channel link** —
+  reinstall the current AppImage with `install.sh`, or launch Slackinux once so
+  it registers the deep-link handler for your user account. These links do not
+  transfer a browser login session into Slackinux.
 - **External sites open in the browser** — only main-frame navigations open
   externally; third-party iframes inside Slack (analytics, SSO) stay in-app.
-- **Calls don't work** — WebRTC needs PipeWire and the desktop portal; the
-  startup log reports `PipeWire: available` / `Portal: available`.
+- **Calls don't work** — Huddles are experimental because Slack does not
+  officially support WebKitGTK. WebRTC also needs PipeWire and the desktop
+  portal; the startup log reports their detected state.
 - **AppImage fails to mount** — install `libfuse2` or run with
   `--appimage-extract-and-run`.
 - **`.relr.dyn` link error on Arch** — rebuild with `NO_STRIP=1`.

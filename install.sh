@@ -72,6 +72,31 @@ asset_url() {
         "$REPOSITORY" "$release_version" "$filename"
 }
 
+verify_release_asset() {
+    package_path=$1
+    filename=$2
+    checksums="$temporary_dir/SHA256SUMS"
+    if [ ! -f "$checksums" ]; then
+        if ! download \
+                "https://github.com/$REPOSITORY/releases/download/v$release_version/SHA256SUMS" \
+                "$checksums"; then
+            printf 'Warning: this legacy release has no SHA-256 manifest.\n' >&2
+            return 0
+        fi
+    fi
+    expected=$(awk -v name="$filename" '$2 == name { print $1; exit }' "$checksums")
+    [ -n "$expected" ] || die "SHA-256 checksum is missing for $filename"
+    if command_exists sha256sum; then
+        actual=$(sha256sum "$package_path" | awk '{ print $1 }')
+    elif command_exists shasum; then
+        actual=$(shasum -a 256 "$package_path" | awk '{ print $1 }')
+    else
+        die "sha256sum or shasum is required to verify the download"
+    fi
+    [ "$actual" = "$expected" ] || die "SHA-256 verification failed for $filename"
+    printf 'Verified SHA-256: %s\n' "$filename"
+}
+
 while [ "$#" -gt 0 ]; do
     case $1 in
         --auto) INSTALL_KIND="auto" ;;
@@ -115,6 +140,7 @@ case $INSTALL_KIND in
         finish_dry_run "$url"
         package="$temporary_dir/slackinux.deb"
         download "$url" "$package"
+        verify_release_asset "$package" "Slackinux_${release_version}_amd64.deb"
         if command_exists apt; then
             run_as_root apt install -y "$package"
         else
@@ -126,6 +152,7 @@ case $INSTALL_KIND in
         finish_dry_run "$url"
         package="$temporary_dir/slackinux.rpm"
         download "$url" "$package"
+        verify_release_asset "$package" "Slackinux-${release_version}-1.x86_64.rpm"
         if command_exists dnf; then
             run_as_root dnf install -y "$package"
         elif command_exists yum; then
@@ -144,12 +171,17 @@ case $INSTALL_KIND in
         desktop_dir=${XDG_DATA_HOME:-"$HOME/.local/share"}/applications
         icon_dir=${XDG_DATA_HOME:-"$HOME/.local/share"}/icons/hicolor/512x512/apps
         mkdir -p "$app_dir" "$bin_dir" "$desktop_dir" "$icon_dir"
-        download "$url" "$app_dir/Slackinux.AppImage"
-        chmod 755 "$app_dir/Slackinux.AppImage"
+        staged_appimage="$temporary_dir/Slackinux.AppImage"
+        download "$url" "$staged_appimage"
+        verify_release_asset "$staged_appimage" "Slackinux_${release_version}_amd64.AppImage"
+        chmod 755 "$staged_appimage"
+        mv "$staged_appimage" "$app_dir/Slackinux.AppImage"
         ln -sf "$app_dir/Slackinux.AppImage" "$bin_dir/slackinux"
+        staged_icon="$temporary_dir/slackinux.png"
         download \
             "https://raw.githubusercontent.com/$REPOSITORY/main/apps/desktop/src-tauri/icons/512x512.png" \
-            "$icon_dir/slackinux.png"
+            "$staged_icon"
+        mv "$staged_icon" "$icon_dir/slackinux.png"
         desktop_file="$desktop_dir/com.slackinux.desktop"
         printf '%s\n' \
             '[Desktop Entry]' \

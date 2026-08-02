@@ -59,7 +59,7 @@ impl AppState {
 }
 
 fn main() -> AppResult<()> {
-    runtime::prefer_host_webkit_for_rolling_appimage();
+    runtime::prefer_host_webkit_for_appimage();
     diagnostics::init_logging();
 
     let version = env!("CARGO_PKG_VERSION");
@@ -92,13 +92,18 @@ fn main() -> AppResult<()> {
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
                 // AppImages do not have a traditional installer. Registering
-                // here makes browser sign-in callbacks work even when the
-                // user launches the AppImage directly or moves it.
+                // here makes normal Slack workspace/channel links work even
+                // when the user launches the AppImage directly or moves it.
                 if let Err(err) = app.deep_link().register_all() {
                     // Missing desktop-database tools must never prevent Slack
                     // itself from opening; packaged and shell installs still
                     // carry the static MIME association.
                     warn!("could not register Slack browser callback handler: {err}");
+                }
+                if let Err(err) = deep_links::ensure_linux_handler() {
+                    warn!("could not repair Slack browser callback handler: {err}");
+                } else {
+                    info!("Slack browser callback handler is registered");
                 }
             }
 
@@ -280,11 +285,6 @@ fn main() -> AppResult<()> {
                 .build(app)?;
             let login_in_app =
                 MenuItemBuilder::with_id("login_in_app", "Sign In to Slack").build(app)?;
-            let login_browser = MenuItemBuilder::with_id(
-                "login_browser",
-                "Open Sign-In in Browser",
-            )
-            .build(app)?;
             let dnd_toggle = MenuItemBuilder::with_id("dnd_toggle", "Do Not Disturb")
                 .accelerator("CmdOrCtrl+D")
                 .build(app)?;
@@ -403,7 +403,6 @@ fn main() -> AppResult<()> {
 
             let account_menu = SubmenuBuilder::new(app, "Account")
                 .item(&login_in_app)
-                .item(&login_browser)
                 .separator()
                 .item(&dnd_toggle)
                 .item(&clear_cache)
@@ -510,12 +509,6 @@ fn main() -> AppResult<()> {
                     let state = app.state::<AppState>();
                     info!("opening Slack sign-in in the app");
                     let _ = state.renderer.navigate("https://app.slack.com/signin");
-                }
-                "login_browser" => {
-                    info!("opening Slack sign-in in the system browser");
-                    if let Err(err) = open::that_detached("https://slack.com/signin") {
-                        error!("failed to open Slack sign-in in browser: {err}");
-                    }
                 }
                 "check_updates" => {
                     updates::check_for_updates(app.clone(), updates::UpdateCheckReason::Manual);

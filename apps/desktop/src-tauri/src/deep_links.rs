@@ -1,5 +1,59 @@
 use url::Url;
 
+#[cfg(target_os = "linux")]
+pub fn ensure_linux_handler() -> Result<(), String> {
+    use std::fmt::Write as _;
+
+    let data_home = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".local/share"))
+        })
+        .ok_or_else(|| "HOME and XDG_DATA_HOME are unavailable".to_string())?;
+    let applications = data_home.join("applications");
+    std::fs::create_dir_all(&applications).map_err(|error| error.to_string())?;
+
+    let executable = std::env::var_os("APPIMAGE")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_exe().ok())
+        .ok_or_else(|| "could not determine the Slackinux executable".to_string())?;
+    let escaped = executable
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let mut desktop = String::new();
+    writeln!(desktop, "[Desktop Entry]").unwrap();
+    writeln!(desktop, "Type=Application").unwrap();
+    writeln!(desktop, "Name=Slackinux URL Handler").unwrap();
+    writeln!(desktop, "NoDisplay=true").unwrap();
+    writeln!(desktop, "Exec=\"{escaped}\" %u").unwrap();
+    writeln!(desktop, "MimeType=x-scheme-handler/slack;").unwrap();
+    writeln!(desktop, "Terminal=false").unwrap();
+
+    let handler = applications.join("slackinux-handler.desktop");
+    write_atomic(&handler, desktop.as_bytes())?;
+
+    let status = std::process::Command::new("xdg-mime")
+        .args([
+            "default",
+            "slackinux-handler.desktop",
+            "x-scheme-handler/slack",
+        ])
+        .status();
+    match status {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!("xdg-mime exited with {status}")),
+        Err(error) => Err(format!("could not run xdg-mime: {error}")),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn write_atomic(path: &std::path::Path, content: &[u8]) -> Result<(), String> {
+    let temporary = path.with_extension("desktop.tmp");
+    std::fs::write(&temporary, content).map_err(|error| error.to_string())?;
+    std::fs::rename(&temporary, path).map_err(|error| error.to_string())
+}
+
 /// Finds the first Slack callback passed by a desktop launcher or a second
 /// process and converts it to a safe Slack Web destination.
 pub fn slack_url_from_args(args: &[String]) -> Option<Url> {

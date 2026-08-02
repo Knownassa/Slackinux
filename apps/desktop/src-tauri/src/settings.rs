@@ -83,7 +83,13 @@ impl Settings {
     pub fn save(&self, data_dir: &std::path::Path) {
         let path = data_dir.join("settings.json");
         if let Ok(content) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(path, content);
+            let temporary = data_dir.join("settings.json.tmp");
+            let result = std::fs::write(&temporary, content)
+                .and_then(|_| std::fs::rename(&temporary, &path));
+            if let Err(error) = result {
+                log::warn!("could not save settings atomically: {error}");
+                let _ = std::fs::remove_file(temporary);
+            }
         }
     }
 }
