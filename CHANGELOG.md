@@ -4,6 +4,14 @@ All notable changes to Slackinux are documented here.
 
 ## Unreleased
 
+## 0.2.5 - 2026-08-02
+
+- Fixed AppImage host-runtime selection by bypassing the packaged binary's
+  `$ORIGIN/../lib` RUNPATH through the host dynamic loader, ensuring a detected
+  host WebKitGTK is actually loaded.
+
+## 0.2.4 - 2026-08-02
+
 - Replaced all launcher, package, tray, repository, and branding icons with the
   latest Slackinux application logo.
 - Fixed AppImage blank screens returning after an in-app update by using
