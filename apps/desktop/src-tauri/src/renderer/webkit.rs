@@ -149,6 +149,7 @@ impl WebKitRenderer {
 
     #[cfg(target_os = "linux")]
     fn setup_navigation_policy(&self, app_handle: tauri::AppHandle) {
+        let webkit_data_dir = self.data_dir.join("webkit");
         let _ = self.window.with_webview(move |pw| {
             use webkit2gtk::glib::Cast;
             use webkit2gtk::{
@@ -276,14 +277,25 @@ impl WebKitRenderer {
                                         "popup: {} -> in-app window popup-{id}",
                                         crate::deep_links::redact_sensitive_url(uri.as_str())
                                     );
-                                    let popup = tauri::WebviewWindowBuilder::new(
+                                    // Share the main window's profile-bound
+                                    // WebContext (same data_directory key) so
+                                    // SSO cookies land in the persistent session
+                                    // and survive restarts. If the profile dir is
+                                    // unavailable (fallback mode), build the
+                                    // popup with a fresh context too.
+                                    let popup_builder = tauri::WebviewWindowBuilder::new(
                                         &app_handle,
                                         format!("popup-{id}"),
                                         tauri::WebviewUrl::External(url),
                                     )
                                     .title("Slackinux — Sign in")
-                                    .inner_size(900.0, 720.0)
-                                    .build();
+                                    .inner_size(900.0, 720.0);
+                                    let popup_builder = if webkit_data_dir.exists() {
+                                        popup_builder.data_directory(webkit_data_dir.clone())
+                                    } else {
+                                        popup_builder
+                                    };
+                                    let popup = popup_builder.build();
                                     match popup {
                                         Ok(popup) => {
                                             let main = app_handle.get_webview_window("main");

@@ -139,7 +139,18 @@ fn main() -> AppResult<()> {
                 .parse::<Url>()
                 .map_err(|e| AppError::InvalidUrl(e.to_string()))?;
 
-            let window = WebviewWindowBuilder::new(
+            // Profile-bound WebContext: cookies/session for the main webview
+            // (and any SSO popups that use the same data directory) persist
+            // under the app profile rather than WebKit's global default
+            // location. If the directory cannot be prepared, fall back to a
+            // fresh context instead of panicking.
+            let webkit_data_dir = data_dir.join("webkit");
+            let shared_context = std::fs::create_dir_all(&webkit_data_dir).is_ok();
+            if !shared_context {
+                warn!("WebKit data directory unavailable; using a fresh session context");
+            }
+
+            let window_builder = WebviewWindowBuilder::new(
                 app,
                 "main",
                 WebviewUrl::App("bootstrap/index.html".into()),
@@ -155,9 +166,13 @@ fn main() -> AppResult<()> {
                 settings::ThemePreference::System => None,
                 settings::ThemePreference::Light => Some(tauri::Theme::Light),
                 settings::ThemePreference::Dark => Some(tauri::Theme::Dark),
-            })
-            .build()
-            .map_err(AppError::Tauri)?;
+            });
+            let window_builder = if shared_context {
+                window_builder.data_directory(webkit_data_dir.clone())
+            } else {
+                window_builder
+            };
+            let window = window_builder.build().map_err(AppError::Tauri)?;
 
             let theme_preference = Arc::new(std::sync::Mutex::new(user_settings.theme_preference));
 
