@@ -222,6 +222,15 @@ impl PermissionBroker {
             })
             .unwrap_or_default()
     }
+
+    /// Total number of stored decisions across all kinds. Used in startup
+    /// logging; intentionally a count only, never host names.
+    pub fn managed_total(&self) -> usize {
+        self.inner
+            .lock()
+            .map(|store| store.by_kind.values().map(|by_host| by_host.len()).sum())
+            .unwrap_or(0)
+    }
 }
 
 fn now_unix() -> u64 {

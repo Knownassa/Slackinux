@@ -252,7 +252,14 @@ fn main() -> AppResult<()> {
             ));
 
             #[cfg(target_os = "linux")]
-            let permission_broker = Arc::new(permissions::PermissionBroker::load(&data_dir));
+            let permission_broker = {
+                let broker = Arc::new(permissions::PermissionBroker::load(&data_dir));
+                info!(
+                    "media permission broker: loaded, {} managed permission(s)",
+                    broker.managed_total()
+                );
+                broker
+            };
 
             #[cfg(target_os = "linux")]
             let media_activity =
