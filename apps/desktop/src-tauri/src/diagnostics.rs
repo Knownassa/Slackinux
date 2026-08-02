@@ -120,6 +120,18 @@ fn support_report() -> String {
     } else {
         "Package or development build"
     };
+    let graphics = {
+        #[cfg(target_os = "linux")]
+        {
+            crate::gpu::applied()
+                .map(|applied| applied.describe())
+                .unwrap_or_else(|| "unknown (policy not applied yet)".into())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            "unknown".into()
+        }
+    };
 
     format!(
         "Slackinux diagnostics\n\
@@ -129,6 +141,7 @@ fn support_report() -> String {
          - Session: {}\n\
          - Desktop: {}\n\
          - Installation: {}\n\
+         - Graphics: {}\n\
          - Log file: {}\n",
         env!("CARGO_PKG_VERSION"),
         distro,
@@ -137,6 +150,7 @@ fn support_report() -> String {
         session,
         desktop,
         installation,
+        graphics,
         LOG_FILE_NAME,
     )
 }

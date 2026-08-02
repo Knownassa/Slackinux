@@ -34,7 +34,7 @@ struct AppState {
     notif_mgr: Arc<NotificationManager>,
     data_dir: std::path::PathBuf,
     zoom_level: Arc<AtomicU16>,
-    gpu_preference: Arc<std::sync::Mutex<settings::GpuPreference>>,
+    graphics_mode: Arc<std::sync::Mutex<settings::GraphicsMode>>,
     theme_preference: Arc<std::sync::Mutex<settings::ThemePreference>>,
     auto_check_updates: Arc<AtomicBool>,
     last_update_check_unix: Arc<AtomicI64>,
@@ -51,7 +51,8 @@ impl AppState {
         settings::Settings {
             zoom_level: self.zoom_level.load(Ordering::Relaxed),
             dnd: self.notif_mgr.is_dnd(),
-            gpu_preference: *self.gpu_preference.lock().unwrap(),
+            graphics_mode: *self.graphics_mode.lock().unwrap(),
+            gpu_preference: None,
             theme_preference: *self.theme_preference.lock().unwrap(),
             auto_check_updates: self.auto_check_updates.load(Ordering::Relaxed),
             last_update_check_unix: self.last_update_check_unix.load(Ordering::Relaxed),
@@ -125,7 +126,8 @@ fn main() -> AppResult<()> {
 
             #[cfg(target_os = "linux")]
             {
-                gpu::apply(user_settings.gpu_preference);
+                let applied = gpu::apply(user_settings.graphics_mode, &data_dir);
+                info!("graphics: {}", applied.describe());
             }
 
             #[cfg(target_os = "linux")]
@@ -208,7 +210,11 @@ fn main() -> AppResult<()> {
                 .build(app)?;
 
             // --- Renderer ---
-            let renderer = Arc::new(WebKitRenderer::new(window.clone(), download_dir));
+            let renderer = Arc::new(WebKitRenderer::new(
+                window.clone(),
+                download_dir,
+                data_dir.clone(),
+            ));
 
             #[cfg(target_os = "linux")]
             {
@@ -231,13 +237,14 @@ fn main() -> AppResult<()> {
             }
 
             let handle = app.handle().clone();
-            let gpu_pref = Arc::new(std::sync::Mutex::new(user_settings.gpu_preference));
+            let graphics_mode =
+                Arc::new(std::sync::Mutex::new(user_settings.graphics_mode));
             handle.manage(AppState {
                 renderer: renderer.clone(),
                 notif_mgr: notif_mgr.clone(),
                 data_dir: data_dir.clone(),
                 zoom_level: zoom_level.clone(),
-                gpu_preference: gpu_pref,
+                graphics_mode,
                 theme_preference: theme_preference.clone(),
                 auto_check_updates: Arc::new(AtomicBool::new(user_settings.auto_check_updates)),
                 last_update_check_unix: Arc::new(AtomicI64::new(
@@ -351,17 +358,31 @@ fn main() -> AppResult<()> {
             #[cfg(target_os = "linux")]
             let graphics_menu = {
                 use tauri::menu::CheckMenuItemBuilder;
-                let gpu_auto = CheckMenuItemBuilder::with_id("gpu_auto", "Auto (recommended)")
-                    .checked(user_settings.gpu_preference == settings::GpuPreference::Auto)
+                let gpu_auto = CheckMenuItemBuilder::with_id("gpu_auto", "Automatic")
+                    .checked(user_settings.graphics_mode == settings::GraphicsMode::Automatic)
                     .build(app)?;
-                let gpu_integrated =
-                    CheckMenuItemBuilder::with_id("gpu_integrated", "Integrated GPU")
-                        .checked(user_settings.gpu_preference == settings::GpuPreference::Integrated)
+                let gpu_efficient =
+                    CheckMenuItemBuilder::with_id("gpu_efficient", "Efficient (Integrated GPU)")
+                        .checked(user_settings.graphics_mode == settings::GraphicsMode::Efficient)
                         .build(app)?;
-                let gpu_discrete =
-                    CheckMenuItemBuilder::with_id("gpu_discrete", "Discrete GPU")
-                        .checked(user_settings.gpu_preference == settings::GpuPreference::Discrete)
+                let gpu_performance =
+                    CheckMenuItemBuilder::with_id("gpu_performance", "Performance (Discrete GPU)")
+                        .checked(user_settings.graphics_mode == settings::GraphicsMode::Performance)
                         .build(app)?;
+                let gpu_compatibility = CheckMenuItemBuilder::with_id(
+                    "gpu_compatibility",
+                    "Compatibility (no DMABUF)",
+                )
+                .checked(user_settings.graphics_mode == settings::GraphicsMode::Compatibility)
+                .build(app)?;
+                let gpu_software = CheckMenuItemBuilder::with_id("gpu_software", "Software")
+                    .checked(user_settings.graphics_mode == settings::GraphicsMode::Software)
+                    .build(app)?;
+                let gpu_reset = MenuItemBuilder::with_id(
+                    "gpu_reset",
+                    "Reset Graphics Troubleshooting",
+                )
+                .build(app)?;
                 let gpu_restart = MenuItemBuilder::with_id(
                     "gpu_restart",
                     "Restart to Apply Graphics Changes",
@@ -369,9 +390,12 @@ fn main() -> AppResult<()> {
                 .build(app)?;
                 SubmenuBuilder::with_id(app, "graphics", "Graphics")
                     .item(&gpu_auto)
-                    .item(&gpu_integrated)
-                    .item(&gpu_discrete)
+                    .item(&gpu_efficient)
+                    .item(&gpu_performance)
+                    .item(&gpu_compatibility)
+                    .item(&gpu_software)
                     .separator()
+                    .item(&gpu_reset)
                     .item(&gpu_restart)
                     .build()?
             };
@@ -570,23 +594,43 @@ fn main() -> AppResult<()> {
                     let _ = state.renderer.clear_cache();
                     restart_app(app);
                 }
-                "gpu_auto" | "gpu_integrated" | "gpu_discrete" => {
+                "gpu_auto"
+                | "gpu_efficient"
+                | "gpu_performance"
+                | "gpu_compatibility"
+                | "gpu_software" => {
                     use tauri_plugin_dialog::DialogExt;
                     let state = app.state::<AppState>();
-                    let pref = match id {
-                        "gpu_auto" => settings::GpuPreference::Auto,
-                        "gpu_integrated" => settings::GpuPreference::Integrated,
-                        _ => settings::GpuPreference::Discrete,
+                    let mode = match id {
+                        "gpu_auto" => settings::GraphicsMode::Automatic,
+                        "gpu_efficient" => settings::GraphicsMode::Efficient,
+                        "gpu_performance" => settings::GraphicsMode::Performance,
+                        "gpu_compatibility" => settings::GraphicsMode::Compatibility,
+                        _ => settings::GraphicsMode::Software,
                     };
-                    *state.gpu_preference.lock().unwrap() = pref;
+                    *state.graphics_mode.lock().unwrap() = mode;
                     state.settings().save(&state.data_dir);
-                    set_graphics_checks(app, pref);
-                    info!("graphics preference: {pref} (applies after restart)");
+                    set_graphics_checks(app, mode);
+                    info!("graphics mode: {mode} (applies after restart)");
                     app.dialog()
                         .message(format!(
-                            "Graphics preference set to {pref}.\n\nIt takes effect on the next \
+                            "Graphics mode set to {mode}.\n\nIt takes effect on the next \
                              launch of Slackinux."
                         ))
+                        .title("Slackinux — Graphics")
+                        .kind(tauri_plugin_dialog::MessageDialogKind::Info)
+                        .show(|_| {});
+                }
+                "gpu_reset" => {
+                    use tauri_plugin_dialog::DialogExt;
+                    let state = app.state::<AppState>();
+                    gpu::reset_troubleshooting(&state.data_dir);
+                    info!("graphics troubleshooting state cleared");
+                    app.dialog()
+                        .message(
+                            "Cleared the per-device crash-recovery state.\n\nSlackinux will \
+                             start fresh on the next launch.",
+                        )
                         .title("Slackinux — Graphics")
                         .kind(tauri_plugin_dialog::MessageDialogKind::Info)
                         .show(|_| {});
@@ -839,8 +883,8 @@ fn wait_for_restart_parent() {
     }
 }
 
-/// Keeps the Graphics menu check items consistent with the chosen preference.
-fn set_graphics_checks(app: &tauri::AppHandle, pref: settings::GpuPreference) {
+/// Keeps the Graphics menu check items consistent with the chosen mode.
+fn set_graphics_checks(app: &tauri::AppHandle, mode: settings::GraphicsMode) {
     use tauri::menu::MenuItemKind;
     let Some(menu) = app.menu() else {
         return;
@@ -849,12 +893,17 @@ fn set_graphics_checks(app: &tauri::AppHandle, pref: settings::GpuPreference) {
         return;
     };
     let states = [
-        ("gpu_auto", pref == settings::GpuPreference::Auto),
+        ("gpu_auto", mode == settings::GraphicsMode::Automatic),
+        ("gpu_efficient", mode == settings::GraphicsMode::Efficient),
         (
-            "gpu_integrated",
-            pref == settings::GpuPreference::Integrated,
+            "gpu_performance",
+            mode == settings::GraphicsMode::Performance,
         ),
-        ("gpu_discrete", pref == settings::GpuPreference::Discrete),
+        (
+            "gpu_compatibility",
+            mode == settings::GraphicsMode::Compatibility,
+        ),
+        ("gpu_software", mode == settings::GraphicsMode::Software),
     ];
     for (id, checked) in states {
         if let Some(MenuItemKind::Check(item)) = graphics.get(id) {

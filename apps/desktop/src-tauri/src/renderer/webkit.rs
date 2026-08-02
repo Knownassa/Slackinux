@@ -13,11 +13,16 @@ static POPUP_ID: AtomicU32 = AtomicU32::new(0);
 pub struct WebKitRenderer {
     window: tauri::WebviewWindow,
     download_dir: std::path::PathBuf,
+    data_dir: std::path::PathBuf,
     bootstrap_url: url::Url,
 }
 
 impl WebKitRenderer {
-    pub fn new(window: tauri::WebviewWindow, download_dir: std::path::PathBuf) -> Self {
+    pub fn new(
+        window: tauri::WebviewWindow,
+        download_dir: std::path::PathBuf,
+        data_dir: std::path::PathBuf,
+    ) -> Self {
         let bootstrap_url = window.url().unwrap_or_else(|_| {
             url::Url::parse("tauri://localhost/bootstrap/index.html")
                 .expect("the static local bootstrap URL is valid")
@@ -26,6 +31,7 @@ impl WebKitRenderer {
         Self {
             window,
             download_dir,
+            data_dir,
             bootstrap_url,
         }
     }
@@ -51,7 +57,7 @@ impl WebKitRenderer {
         self.setup_navigation_policy(app_handle.clone());
         self.setup_load_recovery();
         self.setup_permissions();
-        self.setup_crash_recovery();
+        self.setup_crash_recovery(app_handle.clone());
         self.setup_notifications(notif_mgr, app_handle);
         self.setup_title_tracking(update_tooltip);
         self.setup_download_handler();
@@ -67,10 +73,13 @@ impl WebKitRenderer {
                 settings.set_enable_webrtc(true);
                 if crate::gpu::software_rendering_enabled() {
                     settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Never);
-                    info!("Rendering: software compositing (Wayland/NVIDIA compatibility)");
+                    info!("Rendering: software compositing (explicit or confirmed fallback)");
                 } else {
                     settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::OnDemand);
                     info!("Rendering: hardware acceleration on demand");
+                }
+                if crate::gpu::dmabuf_disabled() {
+                    info!("Rendering: DMABUF disabled (compatibility mode)");
                 }
                 settings.set_enable_smooth_scrolling(true);
                 info!("WebRTC: enabled via WebKitGTK settings");
@@ -405,30 +414,45 @@ impl WebKitRenderer {
     }
 
     #[cfg(target_os = "linux")]
-    fn setup_crash_recovery(&self) {
-        let _ = self.window.with_webview(|pw| {
+    fn setup_crash_recovery(&self, app_handle: tauri::AppHandle) {
+        let data_dir = self.data_dir.clone();
+        let _ = self.window.with_webview(move |pw| {
             use webkit2gtk::{LoadEvent, WebViewExt};
             let wk = pw.inner();
-            let consecutive_crashes = std::rc::Rc::new(std::cell::Cell::new(0_u8));
-            let reset_crashes = consecutive_crashes.clone();
+            let reset_crashes = data_dir.clone();
             wk.connect_load_changed(move |_, event| {
                 if event == LoadEvent::Finished {
-                    reset_crashes.set(0);
+                    // A clean load resets the staged recovery counters so a
+                    // single transient crash does not cascade into fallback
+                    // modes (GPU module keys state by session signature).
+                    crate::gpu::record_success(&reset_crashes);
                 }
             });
             wk.connect_web_process_terminated(move |webview, reason| {
                 use webkit2gtk::WebProcessTerminationReason;
                 match reason {
                     WebProcessTerminationReason::Crashed => {
-                        let attempts = consecutive_crashes.get().saturating_add(1);
-                        consecutive_crashes.set(attempts);
-                        if attempts <= 2 {
-                            warn!("Web process crashed — reload attempt {attempts}/2");
-                            webview.reload();
-                        } else {
-                            warn!(
-                                "Web process crashed repeatedly — stopping automatic reload loop"
-                            );
+                        let stage = crate::gpu::crash_stage();
+                        let data_dir = data_dir.clone();
+                        let ah = app_handle.clone();
+                        match crate::gpu::record_crash(&data_dir) {
+                            crate::gpu::CrashAction::Reload => {
+                                warn!(
+                                    "Web process crashed — reloading (recovery stage {stage} -> 1)"
+                                );
+                                webview.reload();
+                            }
+                            crate::gpu::CrashAction::RetryWithCompatibility => {
+                                warn!("Web process crashed again — reloading with DMABUF disabled");
+                                webview.reload();
+                            }
+                            crate::gpu::CrashAction::OfferSoftware => {
+                                warn!(
+                                    "Web process crashed repeatedly — offering software rendering"
+                                );
+                                offer_software_rendering(&ah, &data_dir);
+                                webview.load_uri("about:blank");
+                            }
                         }
                     }
                     WebProcessTerminationReason::ExceededMemoryLimit => {
@@ -496,6 +520,42 @@ impl WebKitRenderer {
             }
         });
     }
+}
+
+/// Shown after repeated web-process crashes: asks the user to confirm software
+/// rendering. Only a confirmed choice persists, so a bad GPU driver cannot
+/// silently degrade the experience; the user always owns the fallback decision.
+#[cfg(target_os = "linux")]
+fn offer_software_rendering(app_handle: &tauri::AppHandle, data_dir: &std::path::Path) {
+    use tauri_plugin_dialog::DialogExt;
+    use tauri_plugin_dialog::MessageDialogButtons;
+    use tauri_plugin_dialog::MessageDialogKind;
+
+    let data_dir = data_dir.to_path_buf();
+    let handle = app_handle.clone();
+    app_handle
+        .dialog()
+        .message(
+            "Slackinux detected repeated rendering failures in the embedded web engine.\n\n\
+             Switch to software rendering? This usually fixes blank or crashing Slack views \
+             on affected graphics drivers.\n\n\
+             You can change this later from the Graphics menu.",
+        )
+        .title("Slackinux — Rendering Problem")
+        .kind(MessageDialogKind::Error)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Switch to Software".into(),
+            "Keep Trying".into(),
+        ))
+        .show(move |confirmed| {
+            if confirmed {
+                info!("software rendering confirmed by the user");
+                crate::gpu::confirm_software(&data_dir);
+                crate::restart_app(&handle);
+            } else {
+                info!("user declined software rendering; keeping the current mode");
+            }
+        });
 }
 
 fn is_https_url(value: &str) -> bool {

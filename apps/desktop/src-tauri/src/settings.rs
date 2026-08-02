@@ -2,21 +2,36 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+/// How Slackinux steers WebKit's graphics stack. The default is `Automatic`,
+/// which uses the compositor/system-selected GPU and keeps hardware
+/// acceleration enabled. Software rendering is never chosen implicitly by GPU
+/// vendor or session type; it requires an explicit user choice or a confirmed,
+/// repeated rendering failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum GpuPreference {
+pub enum GraphicsMode {
+    /// Use the compositor/system-selected GPU; keep hardware acceleration.
     #[default]
-    Auto,
-    Integrated,
-    Discrete,
+    Automatic,
+    /// Prefer the integrated GPU where the app can validly steer rendering
+    /// (X11 PRIME). On Wayland the compositor selects the GPU.
+    Efficient,
+    /// Prefer the discrete GPU when explicitly selected (X11 PRIME offload).
+    Performance,
+    /// Keep hardware acceleration but disable unstable paths such as DMABUF.
+    Compatibility,
+    /// Disable accelerated compositing explicitly.
+    Software,
 }
 
-impl fmt::Display for GpuPreference {
+impl fmt::Display for GraphicsMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            GpuPreference::Auto => write!(f, "auto"),
-            GpuPreference::Integrated => write!(f, "integrated"),
-            GpuPreference::Discrete => write!(f, "discrete"),
+            GraphicsMode::Automatic => write!(f, "automatic"),
+            GraphicsMode::Efficient => write!(f, "efficient"),
+            GraphicsMode::Performance => write!(f, "performance"),
+            GraphicsMode::Compatibility => write!(f, "compatibility"),
+            GraphicsMode::Software => write!(f, "software"),
         }
     }
 }
@@ -45,13 +60,35 @@ pub struct Settings {
     pub zoom_level: u16,
     pub dnd: bool,
     #[serde(default)]
-    pub gpu_preference: GpuPreference,
+    pub graphics_mode: GraphicsMode,
+    /// Legacy field retained so older settings files migrate their GPU choice.
+    #[serde(default)]
+    pub gpu_preference: Option<LegacyGpuPreference>,
     #[serde(default)]
     pub theme_preference: ThemePreference,
     #[serde(default = "default_auto_check_updates")]
     pub auto_check_updates: bool,
     #[serde(default)]
     pub last_update_check_unix: i64,
+}
+
+/// The pre-0.4 GPU preference values, kept only for migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LegacyGpuPreference {
+    Auto,
+    Integrated,
+    Discrete,
+}
+
+impl From<LegacyGpuPreference> for GraphicsMode {
+    fn from(value: LegacyGpuPreference) -> Self {
+        match value {
+            LegacyGpuPreference::Auto => GraphicsMode::Automatic,
+            LegacyGpuPreference::Integrated => GraphicsMode::Efficient,
+            LegacyGpuPreference::Discrete => GraphicsMode::Performance,
+        }
+    }
 }
 
 fn default_auto_check_updates() -> bool {
@@ -63,7 +100,8 @@ impl Default for Settings {
         Self {
             zoom_level: 10,
             dnd: false,
-            gpu_preference: GpuPreference::Auto,
+            graphics_mode: GraphicsMode::Automatic,
+            gpu_preference: None,
             theme_preference: ThemePreference::System,
             auto_check_updates: true,
             last_update_check_unix: 0,
@@ -75,7 +113,18 @@ impl Settings {
     pub fn load(data_dir: &std::path::Path) -> Self {
         let path = data_dir.join("settings.json");
         match std::fs::read_to_string(&path) {
-            Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+            Ok(content) => {
+                let mut settings = serde_json::from_str::<Settings>(&content).unwrap_or_default();
+                // Backward-compatible migration: an older file may have a
+                // `gpu_preference` but no `graphics_mode`. Fold the legacy
+                // choice in rather than silently dropping it.
+                if settings.graphics_mode == GraphicsMode::Automatic {
+                    if let Some(legacy) = settings.gpu_preference {
+                        settings.graphics_mode = legacy.into();
+                    }
+                }
+                settings
+            }
             Err(_) => Self::default(),
         }
     }
@@ -105,7 +154,7 @@ mod tests {
         let settings = Settings::load(&dir);
         assert_eq!(settings.zoom_level, 10);
         assert!(!settings.dnd);
-        assert_eq!(settings.gpu_preference, GpuPreference::Auto);
+        assert_eq!(settings.graphics_mode, GraphicsMode::Automatic);
         assert_eq!(settings.theme_preference, ThemePreference::System);
         assert!(settings.auto_check_updates);
         assert_eq!(settings.last_update_check_unix, 0);
@@ -120,7 +169,8 @@ mod tests {
         let settings = Settings {
             zoom_level: 15,
             dnd: true,
-            gpu_preference: GpuPreference::Discrete,
+            graphics_mode: GraphicsMode::Performance,
+            gpu_preference: None,
             theme_preference: ThemePreference::Dark,
             auto_check_updates: false,
             last_update_check_unix: 1_700_000_000,
@@ -130,7 +180,7 @@ mod tests {
         let loaded = Settings::load(&dir);
         assert_eq!(loaded.zoom_level, 15);
         assert!(loaded.dnd);
-        assert_eq!(loaded.gpu_preference, GpuPreference::Discrete);
+        assert_eq!(loaded.graphics_mode, GraphicsMode::Performance);
         assert_eq!(loaded.theme_preference, ThemePreference::Dark);
         assert!(!loaded.auto_check_updates);
         assert_eq!(loaded.last_update_check_unix, 1_700_000_000);
@@ -148,7 +198,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_gpu_field_defaults_to_auto() {
+    fn missing_graphics_mode_defaults_to_automatic() {
         let dir = std::env::temp_dir().join("slackinux_settings_old_format");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -161,9 +211,55 @@ mod tests {
         let settings = Settings::load(&dir);
         assert_eq!(settings.zoom_level, 12);
         assert!(settings.dnd);
-        assert_eq!(settings.gpu_preference, GpuPreference::Auto);
+        assert_eq!(settings.graphics_mode, GraphicsMode::Automatic);
         assert_eq!(settings.theme_preference, ThemePreference::System);
         assert!(settings.auto_check_updates);
+    }
+
+    #[test]
+    fn legacy_gpu_preference_migrates_to_graphics_mode() {
+        let dir = std::env::temp_dir().join("slackinux_settings_legacy_gpu");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"zoom_level": 10, "dnd": false, "gpu_preference": "integrated"}"#,
+        )
+        .unwrap();
+
+        let settings = Settings::load(&dir);
+        assert_eq!(settings.graphics_mode, GraphicsMode::Efficient);
+
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"zoom_level": 10, "dnd": false, "gpu_preference": "discrete"}"#,
+        )
+        .unwrap();
+        let settings = Settings::load(&dir);
+        assert_eq!(settings.graphics_mode, GraphicsMode::Performance);
+
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"zoom_level": 10, "dnd": false, "gpu_preference": "auto"}"#,
+        )
+        .unwrap();
+        let settings = Settings::load(&dir);
+        assert_eq!(settings.graphics_mode, GraphicsMode::Automatic);
+    }
+
+    #[test]
+    fn explicit_graphics_mode_wins_over_legacy_field() {
+        let dir = std::env::temp_dir().join("slackinux_settings_graphics_wins");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"zoom_level": 10, "dnd": false, "graphics_mode": "software", "gpu_preference": "auto"}"#,
+        )
+        .unwrap();
+
+        let settings = Settings::load(&dir);
+        assert_eq!(settings.graphics_mode, GraphicsMode::Software);
     }
 
     #[test]
@@ -173,7 +269,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("settings.json"),
-            r#"{"zoom_level": 10, "dnd": false, "gpu_preference": "auto"}"#,
+            r#"{"zoom_level": 10, "dnd": false, "graphics_mode": "automatic"}"#,
         )
         .unwrap();
 
