@@ -4,9 +4,14 @@
 //! titlebar. GTK and the compositor therefore retain their native resize hit
 //! areas, shadows, tiling behavior, and rounded surface geometry while the app
 //! keeps its compact menu and window controls. The whole window follows the
-//! system light/dark scheme.
+//! system light/dark scheme and, when in system theme mode, the Slack page's
+//! own background.
+//!
+//! The frame uses only Tauri's public Linux APIs (`WebviewWindow::gtk_window`
+//! and `WebviewWindow::default_vbox`) and runs *after* the app menu is set, so
+//! the menubar is already present in the content box and can be reparented
+//! deterministically without polling or internal widget-tree assumptions.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use gtk::gdk;
@@ -28,26 +33,23 @@ pub fn apply_custom_frame(
     window: &tauri::WebviewWindow,
     theme_preference: Arc<std::sync::Mutex<ThemePreference>>,
 ) {
+    // `with_webview` requires a `Send + 'static` closure, so GTK objects are
+    // created inside it via Tauri's public `gtk_window()` / `default_vbox()`.
     let app = app.clone();
+    let window_in_closure = window.clone();
     let _ = window.with_webview(move |pw| {
         let webview = pw.inner();
-        let Some(toplevel) = webview.toplevel() else {
-            debug!("custom frame: no toplevel window yet");
+        let Ok(win) = window_in_closure.gtk_window() else {
+            debug!("custom frame: no GTK window yet");
             return;
         };
-        let Some(win) = toplevel.downcast::<gtk::Window>().ok() else {
-            debug!("custom frame: toplevel is not a GtkWindow");
+        let Ok(content_vbox) = window_in_closure.default_vbox() else {
+            debug!("custom frame: no content box yet");
             return;
         };
+        let win_widget: &gtk::Window = win.upcast_ref::<gtk::Window>();
 
-        // The webview — and, once the app menu is attached, the menubar — live
-        // in the window's content box (tauri's default_vbox).
-        let Some(content_vbox) = win.child().and_then(|c| c.downcast::<gtk::Box>().ok()) else {
-            debug!("custom frame: no content box found");
-            return;
-        };
-
-        let header = build_titlebar(&win, &app);
+        let header = build_titlebar(win_widget, &app);
 
         // Use GTK's supported custom-titlebar path. Its client-side decoration
         // node owns the invisible resize border and compositor-facing window
@@ -62,42 +64,21 @@ pub fn apply_custom_frame(
         content_vbox.style_context().add_class("card");
         content_vbox.style_context().add_class("rounded");
 
-        // The app menubar (tauri/muda) is attached to the content box; move it
-        // into the titlebar's left side. Handle the case where it was attached
-        // before the frame ran, and watch for it arriving after setup.
-        let menubar_added = Arc::new(AtomicBool::new(false));
-        for child in content_vbox.children() {
-            if child.is::<gtk::MenuBar>() {
-                content_vbox.remove(&child);
-                header.pack_start(&child);
-                menubar_added.store(true, Ordering::Relaxed);
-                break;
-            }
+        // The app menu (tauri/muda) is attached before the frame runs, so the
+        // menubar is already a direct child of the content box. Move it into
+        // the titlebar's left side.
+        if let Some(menubar) = find_menubar(&content_vbox) {
+            content_vbox.remove(&menubar);
+            header.pack_start(&menubar);
+            debug!("custom frame: menubar moved into titlebar");
+        } else {
+            debug!("custom frame: menubar not present in the content box");
         }
-        let flag = menubar_added.clone();
-        let watch_vbox = content_vbox.clone();
-        let watch_header = header.clone();
-        gtk::glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-            if flag.load(Ordering::Relaxed) {
-                return gtk::glib::ControlFlow::Break;
-            }
-            for child in watch_vbox.children() {
-                if child.is::<gtk::MenuBar>() {
-                    watch_vbox.remove(&child);
-                    watch_header.pack_start(&child);
-                    watch_header.show_all();
-                    flag.store(true, Ordering::Relaxed);
-                    debug!("custom frame: menubar moved into titlebar");
-                    break;
-                }
-            }
-            gtk::glib::ControlFlow::Continue
-        });
 
         // Follow the system light/dark scheme for the chrome and the opaque
         // webview background.
         let chrome = gtk::CssProvider::new();
-        setup_system_theme(&webview, &win, &chrome, theme_preference.clone());
+        setup_system_theme(&webview, win_widget, &chrome, theme_preference.clone());
 
         // Keep the chrome's corners square when maximized so the window fills
         // the screen edge to edge.
@@ -118,16 +99,17 @@ pub fn apply_custom_frame(
         });
 
         apply_chrome_css(
-            &win,
+            win_widget,
             &chrome,
             theme_is_dark(*theme_preference.lock().unwrap()),
+            None,
         );
 
         // Make the chrome follow the page, i.e. the Slack theme the user picked
         // in the app. After each finished load, probe the page's effective
         // background and re-style the titlebar/card to match.
         let probe_wv = webview.clone();
-        let probe_win = win.clone();
+        let probe_win = win.upcast_ref::<gtk::Window>().clone();
         let probe_chrome = chrome.clone();
         use webkit2gtk::WebViewExt;
         let probe_preference = theme_preference.clone();
@@ -159,85 +141,29 @@ pub fn apply_custom_frame(
                 move |res| {
                     if let Ok(v) = res {
                         let s = v.to_str();
-                        let dark = page_is_dark(&s);
+                        let (dark, page_bg) = page_scheme(&s);
                         debug!(
                             "custom frame: page scheme -> {} ({})",
                             if dark { "dark" } else { "light" },
                             s.trim()
                         );
-                        apply_theme(&wv2, &win2, &chrome2, dark);
+                        apply_theme(&wv2, &win2, &chrome2, dark, page_bg);
                     }
                 },
             );
         });
 
         debug!("custom frame: rounded corners + titlebar applied");
-        if log::log_enabled!(log::Level::Debug) {
-            let mut lines = Vec::new();
-            dump_widget_tree(win.upcast_ref(), 0, &mut lines);
-            debug!("custom frame: widget tree:\n{}", lines.join("\n"));
-        }
-
-        // Second dump after the menubar attaches, to confirm it landed in the
-        // titlebar and the frame settled.
-        let tree_win = win.clone();
-        gtk::glib::timeout_add_local(std::time::Duration::from_millis(3000), move || {
-            if log::log_enabled!(log::Level::Debug) {
-                let mut lines = Vec::new();
-                dump_widget_tree(tree_win.upcast_ref(), 0, &mut lines);
-                debug!("custom frame: settled widget tree:\n{}", lines.join("\n"));
-                let w = &tree_win;
-                debug!(
-                    "custom frame: decorated={} mapped={} size={}x{}",
-                    w.is_decorated(),
-                    w.is_mapped(),
-                    w.allocation().width(),
-                    w.allocation().height()
-                );
-                for child in w.children() {
-                    if child.is::<gtk::EventBox>() {
-                        let a = child.allocation();
-                        debug!(
-                            "custom frame: tao eventbox alloc={}x{} at {},{} visible={}",
-                            a.width(),
-                            a.height(),
-                            a.x(),
-                            a.y(),
-                            child.is_visible()
-                        );
-                    }
-                }
-                dump_frame_metrics(w);
-            }
-            gtk::glib::ControlFlow::Break
-        });
     });
 }
 
-fn dump_widget_tree(widget: &gtk::Widget, depth: usize, out: &mut Vec<String>) {
-    let name = widget.type_().name().to_string();
-    let mut line = format!("{}{}", "  ".repeat(depth), name);
-    if widget.is_visible() {
-        line.push_str(" [v]");
-    } else {
-        line.push_str(" [h]");
-    }
-    let classes = widget
-        .style_context()
-        .list_classes()
-        .iter()
-        .map(|c| c.to_string())
-        .collect::<Vec<_>>()
-        .join(",");
-    if !classes.is_empty() {
-        line.push_str(&format!(" <{classes}>"));
-    }
-    out.push(line);
-    if let Some(container) = widget.downcast_ref::<gtk::Container>() {
-        for child in container.children() {
-            dump_widget_tree(&child, depth + 1, out);
-        }
-    }
+/// Finds the app menubar among the direct children of the content box.
+fn find_menubar(content_vbox: &gtk::Box) -> Option<gtk::MenuBar> {
+    content_vbox
+        .children()
+        .into_iter()
+        .find(|child| child.is::<gtk::MenuBar>())
+        .and_then(|child| child.downcast::<gtk::MenuBar>().ok())
 }
 
 /// A compact titlebar: app menubar on the left, title in the center, and
@@ -376,8 +302,13 @@ fn build_window_menu(win: &gtk::Window, app: &tauri::AppHandle, maximized: bool)
 
 /// Thin titlebar + rounded corners via CSS. The chrome (titlebar and the
 /// opaque card under the webview) is re-styled whenever the scheme flips.
-fn apply_chrome_css(win: &gtk::Window, provider: &gtk::CssProvider, dark: bool) {
-    let css = chrome_css(dark);
+fn apply_chrome_css(
+    win: &gtk::Window,
+    provider: &gtk::CssProvider,
+    dark: bool,
+    page_bg: Option<(f64, f64, f64)>,
+) {
+    let css = chrome_css(dark, page_bg);
     THEME_PROVIDER.with(|stored| {
         let mut stored = stored.borrow_mut();
         let active = stored.get_or_insert_with(|| {
@@ -396,8 +327,10 @@ fn apply_chrome_css(win: &gtk::Window, provider: &gtk::CssProvider, dark: bool) 
     });
 }
 
-fn chrome_css(dark: bool) -> String {
-    let card_bg = if dark { "#1d1c1d" } else { "#f6f7f8" };
+fn chrome_css(dark: bool, page_bg: Option<(f64, f64, f64)>) -> String {
+    let card_bg = page_bg
+        .map(rgb_to_css)
+        .unwrap_or_else(|| if dark { "#1d1c1d" } else { "#f6f7f8" }.to_string());
     let chrome_bg = if dark { "#242126" } else { "#ffffff" };
     let fg = if dark { "#f1eef1" } else { "#29252b" };
     let muted_fg = if dark { "#c9c3ca" } else { "#5f5661" };
@@ -502,6 +435,16 @@ headerbar.titlebar.rounded {{
     )
 }
 
+/// Converts a parsed CSS color to a `#rrggbb` string for the chrome card.
+fn rgb_to_css((r, g, b): (f64, f64, f64)) -> String {
+    format!(
+        "#{:02x}{:02x}{:02x}",
+        (r.round() as u32).min(255),
+        (g.round() as u32).min(255),
+        (b.round() as u32).min(255)
+    )
+}
+
 // --- System light/dark theme ---
 
 fn setup_system_theme(
@@ -511,7 +454,7 @@ fn setup_system_theme(
     preference: Arc<std::sync::Mutex<ThemePreference>>,
 ) {
     let dark = theme_is_dark(*preference.lock().unwrap());
-    apply_theme(webview, win, chrome, dark);
+    apply_theme(webview, win, chrome, dark, None);
     debug!(
         "custom frame: initial theme = {}",
         if dark { "dark" } else { "light" }
@@ -534,7 +477,7 @@ fn setup_system_theme(
                         "custom frame: theme change -> {}",
                         if dark { "dark" } else { "light" }
                     );
-                    apply_theme(&webview, &win, &chrome, dark);
+                    apply_theme(&webview, &win, &chrome, dark, None);
                 }
             });
         }
@@ -570,7 +513,7 @@ pub fn set_theme(window: &tauri::WebviewWindow, preference: ThemePreference) {
         };
         let provider = gtk::CssProvider::new();
         let dark = theme_is_dark(preference);
-        apply_theme(&webview, &win, &provider, dark);
+        apply_theme(&webview, &win, &provider, dark, None);
         info!("theme: applied {preference}");
     });
 }
@@ -625,6 +568,7 @@ fn apply_theme(
     win: &gtk::Window,
     chrome: &gtk::CssProvider,
     dark: bool,
+    page_bg: Option<(f64, f64, f64)>,
 ) {
     // Match the chrome — and, via the GTK application preference that WebKit
     // reads, the page's prefers-color-scheme — to the system scheme, so the
@@ -633,46 +577,57 @@ fn apply_theme(
         settings.set_gtk_application_prefer_dark_theme(dark);
     }
     use webkit2gtk::WebViewExt;
-    // Slack's app background (#1d1c1d dark, white light). The webview and
-    // surrounding chrome share the color around the clipped corners.
-    let (r, g, b) = if dark {
+    // The webview and surrounding chrome share the color around the clipped
+    // corners. Prefer the probed page background (Slack's real canvas); fall
+    // back to the known Slack surfaces only when the page has not been probed.
+    let (r, g, b) = page_bg.unwrap_or(if dark {
         (0.114, 0.110, 0.114)
     } else {
         (1.0, 1.0, 1.0)
-    };
+    });
     webview.set_background_color(&gdk::RGBA::new(r, g, b, 1.0));
-    apply_chrome_css(win, chrome, dark);
+    apply_chrome_css(win, chrome, dark, page_bg);
 }
 
-/// Decide light vs dark from the page probe. When the page has accidentally
+/// Decides light vs dark from the page probe and extracts the page's opaque
+/// background so the chrome can match it. When the page has accidentally
 /// produced low-contrast text (Slack's sign-in page can mix dark-mode backing
 /// with light-mode text styles), prefer the opposite scheme so WebKit gets a
-/// readable page. Otherwise the effective page background wins.
-fn page_is_dark(probe: &str) -> bool {
+/// readable page.
+fn page_scheme(probe: &str) -> (bool, Option<(f64, f64, f64)>) {
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(probe) {
         let bg = json["bg"].as_str().and_then(parse_rgb);
         let fg = json["fg"].as_str().and_then(parse_rgb);
-        if let (Some(background), Some(foreground)) = (bg, fg) {
+        let dark = if let (Some(background), Some(foreground)) = (bg, fg) {
             let bg_lum = luminance(background);
             let fg_lum = luminance(foreground);
             if (bg_lum - fg_lum).abs() < 72.0 {
-                return fg_lum >= 128.0;
+                fg_lum >= 128.0
+            } else {
+                bg_lum < 128.0
             }
-            return bg_lum < 128.0;
-        }
-        if let Some(background) = bg {
-            return luminance(background) < 128.0;
-        }
-        // A transparent page with dark text needs a light opaque backing;
-        // likewise, light text needs a dark one.
-        if let Some(foreground) = fg {
-            return luminance(foreground) >= 128.0;
-        }
-        if let Some(dark) = json["dark"].as_bool() {
-            return dark;
-        }
+        } else if let Some(background) = bg {
+            luminance(background) < 128.0
+        } else if let Some(foreground) = fg {
+            luminance(foreground) >= 128.0
+        } else if let Some(dark) = json["dark"].as_bool() {
+            dark
+        } else {
+            detect_dark_system()
+        };
+        // A transparent page background (e.g. the sign-in page probing too
+        // early) must not repaint the card; keep the fallback color instead.
+        let opaque_bg = bg.filter(|(r, g, b)| !(*r == 0.0 && *g == 0.0 && *b == 0.0));
+        (dark, opaque_bg)
+    } else {
+        (detect_dark_system(), None)
     }
-    detect_dark_system()
+}
+
+/// Kept for backwards compatibility with existing tests.
+#[cfg(test)]
+fn page_is_dark(probe: &str) -> bool {
+    page_scheme(probe).0
 }
 
 fn luminance((r, g, b): (f64, f64, f64)) -> f64 {
@@ -689,181 +644,6 @@ fn parse_rgb(css: &str) -> Option<(f64, f64, f64)> {
     let g = parts.next()?.trim().parse::<f64>().ok()?;
     let b = parts.next()?.trim().parse::<f64>().ok()?;
     Some((r, g, b))
-}
-
-fn dump_frame_metrics(w: &gtk::Window) {
-    use gtk::prelude::WidgetExt;
-    let win_alloc = w.allocation();
-    debug!(
-        "frame: window alloc={}x{} resizable={} decorated={} visual_depth={} composited={}",
-        win_alloc.width(),
-        win_alloc.height(),
-        w.is_resizable(),
-        w.is_decorated(),
-        w.visual().map(|v| v.depth()).unwrap_or(0),
-        gtk::prelude::WidgetExt::screen(w)
-            .map(|s| s.is_composited())
-            .unwrap_or(false)
-    );
-    if let Some(titlebar) = w.titlebar() {
-        let (min, natural) = titlebar.preferred_height();
-        let allocation = titlebar.allocation();
-        debug!(
-            "frame: native titlebar type={} preferred_min={} natural={} alloc={}x{}",
-            titlebar.type_().name(),
-            min,
-            natural,
-            allocation.width(),
-            allocation.height()
-        );
-    }
-    for child in w.children() {
-        if child.is::<gtk::Box>() {
-            let children = child.downcast_ref::<gtk::Container>().unwrap().children();
-            for gc in children {
-                if gc.is::<gtk::HeaderBar>() {
-                    let (min, nat) = gc.preferred_height();
-                    debug!(
-                        "frame: headerbar preferred_min={} natural={} alloc={}x{} has_window={}",
-                        min,
-                        nat,
-                        gc.allocation().width(),
-                        gc.allocation().height(),
-                        gc.has_window()
-                    );
-                    let header_children = gc.downcast_ref::<gtk::Container>().unwrap().children();
-                    for bc in header_children {
-                        let (_, bnat) = bc.preferred_height();
-                        let (hfw_min, hfw_nat) =
-                            bc.preferred_height_for_width(bc.allocation().width());
-                        let ba = bc.allocation();
-                        debug!(
-                            "frame:   child type={} class={} natural_height={} hfw={}/{} alloc={}x{} at {},{}",
-                            bc.type_().name(),
-                            bc.style_context()
-                                .list_classes()
-                                .iter()
-                                .map(|c| c.to_string())
-                                .collect::<Vec<_>>()
-                                .join(","),
-                            bnat,
-                            hfw_min,
-                            hfw_nat,
-                            ba.width(),
-                            ba.height(),
-                            ba.x(),
-                            ba.y()
-                        );
-                    }
-                    let internal: std::cell::RefCell<Vec<String>> =
-                        std::cell::RefCell::new(Vec::new());
-                    gc.downcast_ref::<gtk::Container>().unwrap().forall(|w| {
-                        let (min, nat) = w.preferred_height();
-                        let a = w.allocation();
-                        internal.borrow_mut().push(format!(
-                            "{} class=[{}] min={}/nat={} alloc={}x{}",
-                            w.type_().name(),
-                            w.style_context()
-                                .list_classes()
-                                .iter()
-                                .map(|c| c.to_string())
-                                .collect::<Vec<_>>()
-                                .join(","),
-                            min,
-                            nat,
-                            a.width(),
-                            a.height()
-                        ));
-                        if let Some(box_) = w.downcast_ref::<gtk::Box>() {
-                            let sub: std::cell::RefCell<Vec<String>> =
-                                std::cell::RefCell::new(Vec::new());
-                            box_.forall(|c| {
-                                let (m, n) = c.preferred_height();
-                                sub.borrow_mut().push(format!(
-                                    "{} class=[{}] min={}/nat={} text={}",
-                                    c.type_().name(),
-                                    c.style_context()
-                                        .list_classes()
-                                        .iter()
-                                        .map(|s| s.to_string())
-                                        .collect::<Vec<_>>()
-                                        .join(","),
-                                    m,
-                                    n,
-                                    c.downcast_ref::<gtk::Label>()
-                                        .map(|l| l.text().to_string())
-                                        .unwrap_or_default()
-                                ));
-                            });
-                            if !sub.borrow().is_empty() {
-                                internal
-                                    .borrow_mut()
-                                    .push(format!("     box kids: {}", sub.borrow().join(" | ")));
-                            }
-                        }
-                    });
-                    debug!("frame:   internal: {}", internal.borrow().join(" | "));
-                }
-                if gc.is::<webkit2gtk::WebView>() {
-                    let a = gc.allocation();
-                    debug!(
-                        "frame: webview alloc={}x{} at {},{}",
-                        a.width(),
-                        a.height(),
-                        a.x(),
-                        a.y()
-                    );
-                }
-            }
-        }
-    }
-    let theme = gtk::IconTheme::default();
-    for icon in [
-        "window-minimize-symbolic",
-        "window-maximize-symbolic",
-        "window-close-symbolic",
-    ] {
-        debug!(
-            "frame: icon {icon} available={}",
-            theme.as_ref().map(|t| t.has_icon(icon)).unwrap_or(false)
-        );
-    }
-
-    if let Some(hb) = w.children().iter().find_map(|c| {
-        c.downcast_ref::<gtk::Container>()
-            .and_then(|bx| bx.children().into_iter().find(|g| g.is::<gtk::HeaderBar>()))
-    }) {
-        let fresh = gtk::HeaderBar::new();
-        fresh.set_show_close_button(false);
-        fresh.set_decoration_layout(Some(":"));
-        fresh.style_context().add_class("titlebar");
-        fresh.style_context().add_class("rounded");
-        let (fm, fn_) = fresh.preferred_height();
-        let (m, n) = hb.preferred_height();
-        debug!(
-            "frame: fresh headerbar min={}/nat={} vs real min={}/nat={}",
-            fm, fn_, m, n
-        );
-        use gtk::cairo::{Context, Format, ImageSurface};
-        const S: i32 = 28;
-        let mut surface = ImageSurface::create(Format::ARgb32, S, S).unwrap();
-        let cr = Context::new(&surface).unwrap();
-        cr.set_source_rgba(0.0, 0.0, 0.0, 0.0);
-        let _ = cr.paint();
-        let _ = cr.save();
-        cr.scale(1.0, 1.0);
-        hb.draw(&cr);
-        drop(cr);
-        surface.flush();
-        let data = surface.data().unwrap();
-        let px = |x: i32, y: i32| -> u8 { data[(y * S + x) as usize * 4 + 3] };
-        debug!(
-            "frame: headerbar corner alpha (1,1)={} (12,1)={} (1,12)={}",
-            px(1, 1),
-            px(12, 1),
-            px(1, 12)
-        );
-    }
 }
 
 #[cfg(test)]

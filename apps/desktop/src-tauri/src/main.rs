@@ -161,9 +161,6 @@ fn main() -> AppResult<()> {
 
             let theme_preference = Arc::new(std::sync::Mutex::new(user_settings.theme_preference));
 
-            #[cfg(target_os = "linux")]
-            frame::apply_custom_frame(app.handle(), &window, theme_preference.clone());
-
             let download_dir = data_dir.join("downloads");
             std::fs::create_dir_all(&download_dir).ok();
 
@@ -468,6 +465,11 @@ fn main() -> AppResult<()> {
                 menu.append(&graphics_menu)?;
                 menu.append(&account_menu)?;
             }
+
+            // The custom frame runs after the app menu is set so the menubar is
+            // already attached and can be reparented without polling.
+            #[cfg(target_os = "linux")]
+            frame::apply_custom_frame(app.handle(), &window, theme_preference.clone());
 
             // --- Close to tray ---
             let window_clone = window.clone();
