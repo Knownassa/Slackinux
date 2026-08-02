@@ -179,6 +179,31 @@ fn support_report(app: &tauri::AppHandle) -> String {
         }
     };
 
+    let huddles = {
+        #[cfg(target_os = "linux")]
+        {
+            let report = crate::huddles::probe_environment();
+            format!(
+                "{} ({}; {})",
+                report.classify().label(),
+                if report.pipewire_connected {
+                    "pipewire up"
+                } else {
+                    "pipewire down"
+                },
+                if report.screencast_portal {
+                    "portal screencast up"
+                } else {
+                    "portal screencast down"
+                },
+            )
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            "unavailable on this platform".into()
+        }
+    };
+
     format!(
         "Slackinux diagnostics\n\
          - Version: {}\n\
@@ -189,6 +214,7 @@ fn support_report(app: &tauri::AppHandle) -> String {
          - Installation: {}\n\
          - Graphics: {}\n\
          - Media permissions: {}\n\
+         - Huddles: {}\n\
          - Log file: {}\n",
         env!("CARGO_PKG_VERSION"),
         distro,
@@ -199,6 +225,7 @@ fn support_report(app: &tauri::AppHandle) -> String {
         installation,
         graphics,
         media,
+        huddles,
         LOG_FILE_NAME,
     )
 }

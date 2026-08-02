@@ -911,6 +911,29 @@ impl SlackRenderer for WebKitRenderer {
             false
         }
     }
+
+    #[cfg(target_os = "linux")]
+    fn probe_media_codecs(&self, on_result: Box<dyn FnOnce(Option<String>) + Send + 'static>) {
+        let _ = self.window.with_webview(move |pw| {
+            use javascriptcore::ValueExt;
+            use webkit2gtk::gio::Cancellable;
+            use webkit2gtk::WebViewExt;
+            let script = crate::huddles::codec_probe_script();
+            pw.inner().evaluate_javascript(
+                script,
+                None,
+                None,
+                None::<&Cancellable>,
+                move |result| match result {
+                    Ok(value) => on_result(Some(value.to_str().to_string())),
+                    Err(error) => {
+                        warn!("huddle codec probe failed: {error}");
+                        on_result(None);
+                    }
+                },
+            );
+        });
+    }
 }
 
 #[cfg(test)]

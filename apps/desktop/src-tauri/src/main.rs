@@ -7,6 +7,8 @@ mod error;
 mod frame;
 #[cfg(target_os = "linux")]
 mod gpu;
+#[cfg(target_os = "linux")]
+mod huddles;
 mod navigation;
 mod notifications;
 #[cfg(target_os = "linux")]
@@ -362,14 +364,24 @@ fn main() -> AppResult<()> {
                 MenuItemBuilder::with_id("open_logs", "Open Log Folder").build(app)?;
             let copy_diagnostics =
                 MenuItemBuilder::with_id("copy_diagnostics", "Copy Diagnostic Info").build(app)?;
+            #[cfg(target_os = "linux")]
+            let huddle_diagnostic = MenuItemBuilder::with_id(
+                "huddle_diagnostic",
+                "Huddle Compatibility Check…",
+            )
+            .build(app)?;
             let report_issue =
                 MenuItemBuilder::with_id("report_issue", "Report an Issue…").build(app)?;
-            let diagnostics_menu = SubmenuBuilder::new(app, "Diagnostics")
-                .item(&open_logs)
-                .item(&copy_diagnostics)
-                .separator()
-                .item(&report_issue)
-                .build()?;
+            let diagnostics_menu = {
+                let mut builder = SubmenuBuilder::new(app, "Diagnostics")
+                    .item(&open_logs)
+                    .item(&copy_diagnostics);
+                #[cfg(target_os = "linux")]
+                {
+                    builder = builder.item(&huddle_diagnostic);
+                }
+                builder.separator().item(&report_issue).build()?
+            };
             let about = MenuItemBuilder::with_id("about", "About Slackinux").build(app)?;
             let win_minimize = MenuItemBuilder::with_id("win_minimize", "Minimize")
                 .accelerator("CmdOrCtrl+M")
@@ -642,6 +654,11 @@ fn main() -> AppResult<()> {
                 "open_logs" => diagnostics::open_log_folder(app),
                 "copy_diagnostics" => diagnostics::copy_support_report(app),
                 "report_issue" => diagnostics::report_issue(app),
+                #[cfg(target_os = "linux")]
+                "huddle_diagnostic" => {
+                    let app = app.clone();
+                    run_huddle_diagnostic(&app);
+                }
                 "dnd_toggle" => {
                     let state = app.state::<AppState>();
                     let dnd = !state.notif_mgr.is_dnd();
@@ -843,6 +860,26 @@ fn detect_portal() -> &'static str {
     } else {
         "not detected"
     }
+}
+
+#[cfg(target_os = "linux")]
+fn run_huddle_diagnostic(app: &tauri::AppHandle) {
+    use tauri_plugin_dialog::DialogExt;
+    let app = app.clone();
+    let state = app.state::<AppState>();
+    let mut report = huddles::probe_environment();
+    let renderer = state.renderer.clone();
+    info!("Huddle diagnostic: initial probe complete");
+    renderer.probe_media_codecs(Box::new(move |codec_payload| {
+        huddles::apply_codec_results(&mut report, codec_payload.as_deref());
+        let summary = huddles::describe(&report);
+        info!("Huddle diagnostic: {}", report.classify().label());
+        app.dialog()
+            .message(format!("{summary}\n\nNo Slack messages, cookies, tokens, or workspace content are included."))
+            .title(format!("Huddle Compatibility — {}", report.classify().label()))
+            .kind(tauri_plugin_dialog::MessageDialogKind::Info)
+            .show(|_| {});
+    }));
 }
 
 fn parse_unread_count(title: &str) -> u32 {
