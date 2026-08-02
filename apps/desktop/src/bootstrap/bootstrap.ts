@@ -13,7 +13,7 @@ function showError(msg: string) {
 // If we detect a navigation failure or timeout, show an error.
 let navTimeout = window.setTimeout(() => {
   showError(
-    "Slack did not load within the expected time. Check your network connection and try restarting the application.",
+    "Slack did not load within the expected time. Check your network, VPN, proxy, and system clock, then try again.",
   );
 }, 30000);
 
@@ -36,7 +36,7 @@ const error = new URLSearchParams(window.location.search).get("error");
 if (error === "timeout") {
   window.clearTimeout(navTimeout);
   showError(
-    "Slack stayed blank while loading. Try again, or use Account → Sign In to Slack. Hardware acceleration has been placed in compatibility mode.",
+    "Slack stayed blank while loading. Try again, or use Account → Sign In / Add Workspace. You can also change Graphics mode and restart from the top panel.",
   );
 } else if (error === "load") {
   window.clearTimeout(navTimeout);

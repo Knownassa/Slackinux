@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use log::{info, warn};
+use tauri::Manager;
 
 use super::SlackRenderer;
 use crate::error::{AppError, AppResult};
@@ -12,14 +13,28 @@ static POPUP_ID: AtomicU32 = AtomicU32::new(0);
 pub struct WebKitRenderer {
     window: tauri::WebviewWindow,
     download_dir: std::path::PathBuf,
+    bootstrap_url: url::Url,
 }
 
 impl WebKitRenderer {
     pub fn new(window: tauri::WebviewWindow, download_dir: std::path::PathBuf) -> Self {
+        let bootstrap_url = window.url().unwrap_or_else(|_| {
+            url::Url::parse("tauri://localhost/bootstrap/index.html")
+                .expect("the static local bootstrap URL is valid")
+        });
+        info!("local recovery page: {bootstrap_url}");
         Self {
             window,
             download_dir,
+            bootstrap_url,
         }
+    }
+
+    fn recovery_url(&self, key: &str, value: &str) -> String {
+        let mut url = self.bootstrap_url.clone();
+        url.set_query(None);
+        url.query_pairs_mut().append_pair(key, value);
+        url.into()
     }
 
     #[cfg(target_os = "linux")]
@@ -68,17 +83,19 @@ impl WebKitRenderer {
 
     #[cfg(target_os = "linux")]
     fn setup_load_recovery(&self) {
-        let _ = self.window.with_webview(|pw| {
+        let load_error_url = self.recovery_url("error", "load");
+        let timeout_url = self.recovery_url("error", "timeout");
+        let _ = self.window.with_webview(move |pw| {
             use webkit2gtk::{LoadEvent, WebViewExt};
             let wk = pw.inner();
             let load_generation = std::rc::Rc::new(std::cell::Cell::new(0_u64));
 
-            wk.connect_load_failed(|webview, _event, failing_uri, error| {
+            wk.connect_load_failed(move |webview, _event, failing_uri, error| {
                 if !failing_uri.starts_with("http://") && !failing_uri.starts_with("https://") {
                     return false;
                 }
                 warn!("Slack page failed to load: {error}");
-                webview.load_uri("tauri://localhost/bootstrap/index.html?error=load");
+                webview.load_uri(&load_error_url);
                 true
             });
 
@@ -90,6 +107,7 @@ impl WebKitRenderer {
                 load_generation.set(generation);
                 let current_generation = load_generation.clone();
                 let pending = webview.clone();
+                let timeout_url = timeout_url.clone();
                 gtk::glib::timeout_add_local_once(std::time::Duration::from_secs(45), move || {
                     let uri = pending.uri().unwrap_or_default();
                     if current_generation.get() == generation
@@ -98,7 +116,7 @@ impl WebKitRenderer {
                     {
                         warn!("Slack page remained blank/loading for 45 seconds; showing recovery");
                         pending.stop_loading();
-                        pending.load_uri("tauri://localhost/bootstrap/index.html?error=timeout");
+                        pending.load_uri(&timeout_url);
                     }
                 });
             });
@@ -136,7 +154,8 @@ impl WebKitRenderer {
             };
 
             let wk = pw.inner();
-            wk.connect_decide_policy(move |_webview, decision, decision_type| {
+            let authentication_flow = std::rc::Rc::new(std::cell::Cell::new(false));
+            wk.connect_decide_policy(move |webview, decision, decision_type| {
                 match decision_type {
                     PolicyDecisionType::Response => {
                         let Some(resp) =
@@ -153,20 +172,50 @@ impl WebKitRenderer {
                         let Some(uri) = resp.request().and_then(|r| r.uri()) else {
                             return false;
                         };
+                        if webview
+                            .uri()
+                            .is_some_and(|current| is_slack_auth_page(current.as_str()))
+                        {
+                            authentication_flow.set(true);
+                        }
+                        if is_slack_client_page(uri.as_str()) {
+                            authentication_flow.set(false);
+                        }
                         match classify(uri.as_str()) {
                             Some(crate::navigation::NavigationDecision::AllowInternal) => {
-                                info!("navigation: {uri} -> AllowInternal");
+                                info!(
+                                    "navigation: {} -> AllowInternal",
+                                    crate::deep_links::redact_sensitive_url(uri.as_str())
+                                );
                                 decision.use_();
                                 true
                             }
                             Some(crate::navigation::NavigationDecision::OpenExternally) => {
-                                info!("navigation: {uri} -> OpenExternally");
+                                // An SSO provider must stay in the same WebKit cookie
+                                // context until it redirects back to Slack. This state
+                                // is entered only from a Slack-owned sign-in page and
+                                // ends as soon as `/client` is reached.
+                                if authentication_flow.get() && is_https_url(uri.as_str()) {
+                                    info!(
+                                        "authentication navigation: {} -> AllowInternal",
+                                        crate::deep_links::redact_sensitive_url(uri.as_str())
+                                    );
+                                    decision.use_();
+                                    return true;
+                                }
+                                info!(
+                                    "navigation: {} -> OpenExternally",
+                                    crate::deep_links::redact_sensitive_url(uri.as_str())
+                                );
                                 let _ = open::that_detached(uri.as_str());
                                 decision.ignore();
                                 true
                             }
                             _ => {
-                                warn!("blocked navigation: {uri}");
+                                warn!(
+                                    "blocked navigation: {}",
+                                    crate::deep_links::redact_sensitive_url(uri.as_str())
+                                );
                                 decision.ignore();
                                 true
                             }
@@ -197,10 +246,28 @@ impl WebKitRenderer {
                             // shared with the main webview and the sign-in
                             // completes without leaving the app.
                             "http" | "https" => {
+                                let from_authentication = authentication_flow.get()
+                                    || webview
+                                        .uri()
+                                        .is_some_and(|current| {
+                                            is_slack_auth_page(current.as_str())
+                                        });
+                                if !from_authentication {
+                                    info!(
+                                        "popup: {} -> OpenExternally",
+                                        crate::deep_links::redact_sensitive_url(uri.as_str())
+                                    );
+                                    let _ = open::that_detached(uri.as_str());
+                                    decision.ignore();
+                                    return true;
+                                }
                                 if let Ok(url) = parsed {
                                     let id = POPUP_ID.fetch_add(1, Ordering::Relaxed);
-                                    info!("popup: {uri} -> in-app window popup-{id}");
-                                    let _ = tauri::WebviewWindowBuilder::new(
+                                    info!(
+                                        "popup: {} -> in-app window popup-{id}",
+                                        crate::deep_links::redact_sensitive_url(uri.as_str())
+                                    );
+                                    let popup = tauri::WebviewWindowBuilder::new(
                                         &app_handle,
                                         format!("popup-{id}"),
                                         tauri::WebviewUrl::External(url),
@@ -208,6 +275,42 @@ impl WebKitRenderer {
                                     .title("Slackinux — Sign in")
                                     .inner_size(900.0, 720.0)
                                     .build();
+                                    match popup {
+                                        Ok(popup) => {
+                                            let main = app_handle.get_webview_window("main");
+                                            let popup_to_close = popup.clone();
+                                            let _ = popup.with_webview(move |popup_webview| {
+                                                use webkit2gtk::{LoadEvent, WebViewExt};
+                                                popup_webview.inner().connect_load_changed(
+                                                    move |webview, event| {
+                                                        if event != LoadEvent::Finished {
+                                                            return;
+                                                        }
+                                                        let Some(uri) = webview.uri() else {
+                                                            return;
+                                                        };
+                                                        if !is_slack_client_page(uri.as_str()) {
+                                                            return;
+                                                        }
+                                                        info!(
+                                                            "SSO completed; opening workspace in main window"
+                                                        );
+                                                        if let Some(main) = main.as_ref() {
+                                                            if let Ok(url) =
+                                                                url::Url::parse(uri.as_str())
+                                                            {
+                                                                let _ = main.navigate(url);
+                                                                let _ = main.show();
+                                                                let _ = main.set_focus();
+                                                            }
+                                                        }
+                                                        let _ = popup_to_close.close();
+                                                    },
+                                                );
+                                            });
+                                        }
+                                        Err(error) => warn!("could not create SSO window: {error}"),
+                                    }
                                 } else {
                                     warn!("popup: {uri} -> invalid URL, blocked");
                                 }
@@ -370,26 +473,109 @@ impl WebKitRenderer {
     fn setup_download_handler(&self) {
         let dd = self.download_dir.clone();
         let _ = self.window.with_webview(move |pw| {
-            use webkit2gtk::{DownloadExt, URIRequestExt, WebContextExt, WebViewExt};
+            use webkit2gtk::{DownloadExt, WebContextExt, WebViewExt};
             let wk = pw.inner();
             if let Some(ctx) = wk.context() {
                 ctx.connect_download_started(move |_ctx, download| {
-                    let name = download
-                        .request()
-                        .and_then(|r| r.uri())
-                        .and_then(|u| {
-                            std::path::Path::new(u.as_str())
-                                .file_name()
-                                .map(|f| f.to_string_lossy().into_owned())
-                        })
-                        .unwrap_or_else(|| "download".into());
-                    let dest = dd.join(&name);
-                    download.set_destination(dest.to_string_lossy().as_ref());
-                    info!("download started: {name}");
+                    let destination_directory = dd.clone();
+                    download.connect_decide_destination(move |download, suggested_filename| {
+                        let name = safe_download_name(suggested_filename);
+                        let destination =
+                            unique_download_path(&destination_directory, name.as_str());
+                        let Ok(destination_uri) = url::Url::from_file_path(&destination) else {
+                            warn!("download blocked: invalid destination path");
+                            return false;
+                        };
+                        download.set_destination(destination_uri.as_str());
+                        info!("download started");
+                        true
+                    });
+                    download.connect_failed(|_, error| warn!("download failed: {error}"));
+                    download.connect_finished(|_| info!("download finished"));
                 });
             }
         });
     }
+}
+
+fn is_https_url(value: &str) -> bool {
+    url::Url::parse(value).is_ok_and(|url| url.scheme() == "https")
+}
+
+fn is_slack_auth_page(value: &str) -> bool {
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    let slack_host = host == "slack.com" || host.ends_with(".slack.com");
+    slack_host
+        && [
+            "/signin",
+            "/workspace-signin",
+            "/sso",
+            "/oauth",
+            "/gantry/auth",
+        ]
+        .iter()
+        .any(|path| url.path().starts_with(path))
+}
+
+fn is_slack_client_page(value: &str) -> bool {
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    url.scheme() == "https"
+        && (host == "app.slack.com" || host.ends_with(".slack.com"))
+        && url.path().starts_with("/client")
+}
+
+fn safe_download_name(suggested: &str) -> String {
+    let name = std::path::Path::new(suggested)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty() && *name != "." && *name != "..")
+        .unwrap_or("download");
+    let sanitized = name
+        .chars()
+        .map(|character| {
+            if character.is_control() || matches!(character, '/' | '\\') {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "download".into()
+    } else {
+        sanitized
+    }
+}
+
+fn unique_download_path(directory: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let original = directory.join(name);
+    if !original.exists() {
+        return original;
+    }
+
+    let path = std::path::Path::new(name);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("download");
+    let extension = path.extension().and_then(|value| value.to_str());
+    for index in 1..10_000 {
+        let candidate_name = match extension {
+            Some(extension) => format!("{stem} ({index}).{extension}"),
+            None => format!("{stem} ({index})"),
+        };
+        let candidate = directory.join(candidate_name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    directory.join(format!("download-{}", std::process::id()))
 }
 
 impl SlackRenderer for WebKitRenderer {
@@ -471,5 +657,40 @@ impl SlackRenderer for WebKitRenderer {
         {
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod download_tests {
+    use super::{
+        is_slack_auth_page, is_slack_client_page, safe_download_name, unique_download_path,
+    };
+
+    #[test]
+    fn recognizes_only_slack_authentication_and_client_pages() {
+        assert!(is_slack_auth_page("https://app.slack.com/workspace-signin"));
+        assert!(is_slack_auth_page("https://example.slack.com/sso/start"));
+        assert!(!is_slack_auth_page("https://evil.example/signin"));
+        assert!(is_slack_client_page(
+            "https://app.slack.com/client/T123/C456"
+        ));
+        assert!(!is_slack_client_page("https://evil.example/client/T123"));
+    }
+
+    #[test]
+    fn sanitizes_download_names_and_avoids_overwriting() {
+        assert_eq!(safe_download_name("../report.pdf"), "report.pdf");
+        assert_eq!(safe_download_name(".."), "download");
+        assert_eq!(safe_download_name("bad\nname.txt"), "bad_name.txt");
+
+        let directory =
+            std::env::temp_dir().join(format!("slackinux-download-test-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("report.pdf"), b"existing").unwrap();
+        assert_eq!(
+            unique_download_path(&directory, "report.pdf"),
+            directory.join("report (1).pdf")
+        );
+        let _ = std::fs::remove_dir_all(directory);
     }
 }

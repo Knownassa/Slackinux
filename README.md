@@ -29,9 +29,9 @@ built with Rust, Tauri 2, and WebKitGTK 4.1.
 </div>
 
 **Slackinux** loads the official Slack Web interface in a native WebKitGTK
-webview, wrapped in a Tauri 2 shell — no Electron, no bundled Chromium, and no
-reverse-engineered Slack APIs. Slack runs exactly as it does in your browser;
-Slackinux is the desktop shell around it.
+webview, wrapped in a Tauri 2 shell — no Electron and no bundled Chromium.
+Slackinux is a desktop shell around Slack's official web interface, not a
+replacement Slack API client.
 
 > **Not affiliated with or endorsed by Slack Technologies.**
 
@@ -60,13 +60,13 @@ focused native Linux shell around the official web application.
 
 | | |
 |---|---|
-| **Native rendering** | WebKitGTK 4.1 — a fraction of the memory and CPU of Electron |
+| **Native rendering** | WebKitGTK 4.1 in a compact Rust/Tauri desktop shell |
 | **Zero-IPC security** | The Slack webview has an empty Tauri capability set; remote code cannot reach the host |
 | **WebRTC** | Origin-restricted camera/microphone access; Huddles remain experimental |
 | **Native notifications** | Click a notification to focus the window; Do Not Disturb (`Ctrl+D`) |
 | **Signed updates** | GitHub-hosted, signature-verified, install-and-restart from the AppImage |
-| **Tray + unread badge** | Close-to-tray, left-click toggle, pending-message count in the tooltip |
-| **Custom frame** | Frameless rounded window with a native app menu and window controls |
+| **Tray + unread badge** | Close-to-tray, Show/Quit controls, and pending-message count in the tooltip |
+| **Native window frame** | Rounded client-side decorations with edge/corner resizing, tiling, and native controls |
 | **Downloads** | Saved to the app data directory (`downloads/`) |
 | **Persisted settings** | Theme, zoom, DND, GPU preference, and update cadence survive restarts |
 
@@ -124,16 +124,18 @@ sudo apt install libwebkit2gtk-4.1-dev build-essential \
   libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
 ```
 
-**Build the debug binary:**
+**Build the production binary:**
 
 ```bash
+cargo install tauri-cli --version "^2"
 cd apps/desktop
 npm install
-cd src-tauri
-cargo build --release
+cargo tauri build --no-bundle
 ```
 
-The binary is written to `target/release/slackinux`.
+The binary is written to `target/release/slackinux`. Use Tauri's build command
+instead of plain `cargo build`: it runs the frontend build and embeds the local
+loading/recovery UI in production mode.
 
 **Bundle installers with the Tauri CLI:**
 
@@ -169,8 +171,10 @@ graphics stacks. It falls back to its bundled runtime when the host library is
 not installed. Keeping the OS and WebKitGTK packages updated is strongly
 recommended.
 
-Messaging, files, notifications, themes, in-app sign-in, and normal Slack
-navigation are the supported core. Camera and microphone requests are
+Messaging, files, notifications, themes, in-app sign-in, SSO, and normal Slack
+navigation are the supported core. Authentication stays in Slackinux's
+isolated webview; SSO windows share its cookie store and return to the app when
+the provider completes authentication. Camera and microphone requests are
 allowed only while the top-level page is on a Slack-owned HTTPS origin. Slack
 does not officially list WebKitGTK as a supported Huddles browser, so audio,
 video, and screen sharing should be treated as experimental.
@@ -187,12 +191,13 @@ video, and screen sharing should be treated as experimental.
 | Minimize | `Ctrl+M` |
 | Quit | `Ctrl+Q` |
 
-The app menu (File, Edit, View, History, Window, Theme, Help) sits at the left of the
-custom titlebar, with minimize, maximize, and close buttons on the right. Drag
-the titlebar to move the window, double-click to maximize, and right-click it
-for a window menu. Closing the window hides it to the tray; use the tray menu's
-**Quit** to fully exit. Unread Slack messages appear as a count in the tray
-tooltip.
+The app menu (File, Edit, View, History, Window, Theme, Help, Graphics,
+Account) sits at the left of the custom titlebar, with minimize, maximize, and
+close buttons on the right. Drag the titlebar to move the window, double-click
+to maximize, and right-click it for a window menu. Closing the window hides it
+to the tray; use **Show Slackinux** or **Quit** from the tray menu. If your
+desktop does not show legacy tray icons, launching Slackinux again restores the
+existing window. Unread messages appear in the tray tooltip where supported.
 
 Use **Theme → System**, **Light**, or **Dark** to change the native top panel
 and Slack's preferred color scheme. The selection is saved for future launches.
@@ -200,18 +205,17 @@ and Slack's preferred color scheme. The selection is saved for future launches.
 - **Account** — sign in, Do Not Disturb, clear cache & restart
 - **View** — zoom and reload controls
 - **Window** — minimize, maximize/restore
-- **Help** — Check for Updates, Release Notes, Diagnostics, About
+- **Help** — Check for Updates, automatic-check toggle, Release Notes,
+  Diagnostics, About
 
 Use **Help → Diagnostics** to open the rotating log folder, copy a privacy-safe
 system summary, or open a pre-filled GitHub bug report. Slackinux never adds
 Slack messages, cookies, tokens, or workspace content to the copied summary.
 
-Sign-in and SSO popups open in an in-app window that shares cookies with the
-main webview, so authentication is retained by Slackinux. System-browser
-authentication is intentionally not offered: browser cookies are isolated from
-WebKitGTK, and Slack does not publish a Linux API for third-party clients to
-redeem its proprietary desktop `magic-login` handoff. Slackinux still registers
-`slack://` for ordinary workspace and channel deep links after authentication.
+Choose **Account → Sign In / Add Workspace…** to authenticate inside
+Slackinux. Workspace SSO opens in a separate in-app window that shares cookies
+with the main Slack view. Ordinary workspace and channel `slack://` links are
+supported after authentication.
 
 ---
 
@@ -306,10 +310,9 @@ with `scripts/check-version-consistency.sh` (also run in CI).
   returns to a visible retry screen; use **Help → Diagnostics → Open Log
   Folder** to find the current and previous logs. Start with `RUST_LOG=debug`
   when more detail is needed.
-- **Browser says no app can open a normal `slack://` workspace/channel link** —
+- **The desktop cannot open a `slack://` workspace/channel link** —
   reinstall the current AppImage with `install.sh`, or launch Slackinux once so
-  it registers the deep-link handler for your user account. These links do not
-  transfer a browser login session into Slackinux.
+  it registers and repairs the deep-link handler for your user account.
 - **External sites open in the browser** — only main-frame navigations open
   externally; third-party iframes inside Slack (analytics, SSO) stay in-app.
 - **Calls don't work** — Huddles are experimental because Slack does not

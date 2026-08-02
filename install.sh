@@ -177,9 +177,26 @@ case $INSTALL_KIND in
         chmod 755 "$staged_appimage"
         mv "$staged_appimage" "$app_dir/Slackinux.AppImage"
         ln -sf "$app_dir/Slackinux.AppImage" "$bin_dir/slackinux"
+
+        # Releases before 0.2.4 installed versioned launchers beside the
+        # stable launcher. Remove only those exact legacy Slackinux artifacts
+        # so a desktop session cannot restart an obsolete, broken AppImage.
+        for legacy_appimage in "$bin_dir"/Slackinux_*_amd64.AppImage; do
+            [ -e "$legacy_appimage" ] || continue
+            rm -f "$legacy_appimage"
+        done
+        for legacy_desktop in "$desktop_dir"/slackinux_*_amd64.desktop; do
+            [ -e "$legacy_desktop" ] || continue
+            rm -f "$legacy_desktop"
+        done
+        rm -f \
+            "$desktop_dir/slackinux-handler.desktop" \
+            "$desktop_dir/ld-linux-x86-64.so.2-handler.desktop" \
+            "$desktop_dir/ld-linux.so.2-handler.desktop"
+
         staged_icon="$temporary_dir/slackinux.png"
         download \
-            "https://raw.githubusercontent.com/$REPOSITORY/main/apps/desktop/src-tauri/icons/512x512.png" \
+            "https://raw.githubusercontent.com/$REPOSITORY/v$release_version/apps/desktop/src-tauri/icons/512x512.png" \
             "$staged_icon"
         mv "$staged_icon" "$icon_dir/slackinux.png"
         desktop_file="$desktop_dir/com.slackinux.desktop"

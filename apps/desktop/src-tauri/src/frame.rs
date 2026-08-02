@@ -1,11 +1,10 @@
-//! Custom window frame — rounded corners on a frameless transparent window.
+//! Custom GTK client-side window frame.
 //!
-//! Linux-only. The window is frameless and transparent; the GTK app menubar
-//! plus a thin titlebar with window controls sit at the top and the web
-//! content fills the rest, all inside a rounded silhouette so all four corners
-//! are rounded. The webview is forced opaque so the interior is never
-//! see-through — only the corner cutouts stay transparent. The whole window
-//! (chrome and Slack content) follows the system light/dark scheme.
+//! Linux-only. A `GtkHeaderBar` is installed as the window's real custom
+//! titlebar. GTK and the compositor therefore retain their native resize hit
+//! areas, shadows, tiling behavior, and rounded surface geometry while the app
+//! keeps its compact menu and window controls. The whole window follows the
+//! system light/dark scheme.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -42,9 +41,7 @@ pub fn apply_custom_frame(
         };
 
         // The webview — and, once the app menu is attached, the menubar — live
-        // in the window's content box (tauri's default_vbox). Keep that box as
-        // the window's direct child so tauri's undecorated-resize handler still
-        // finds the GtkWindow from the webview's parent chain.
+        // in the window's content box (tauri's default_vbox).
         let Some(content_vbox) = win.child().and_then(|c| c.downcast::<gtk::Box>().ok()) else {
             debug!("custom frame: no content box found");
             return;
@@ -52,31 +49,18 @@ pub fn apply_custom_frame(
 
         let header = build_titlebar(&win, &app);
 
-        // tao installs its own Wayland CSD titlebar via set_titlebar; on an
-        // undecorated window GTK collapses that area to 1px. Replace it with an
-        // empty, background-less box so no stray sliver renders across the top.
-        let empty = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        empty.style_context().add_class("transparent");
-        win.set_titlebar(Some(&empty));
-
-        // Pack the titlebar into the window's content box, above the webview.
-        // The webview stays a direct child of that box, so tauri's
-        // undecorated-resize handler still finds the GtkWindow from the
-        // webview's parent chain (window → box → webview).
-        content_vbox.pack_start(&header, false, false, 0);
-        content_vbox.reorder_child(&header, 0);
+        // Use GTK's supported custom-titlebar path. Its client-side decoration
+        // node owns the invisible resize border and compositor-facing window
+        // shape; placing the header inside the content box loses both.
+        win.set_decorated(true);
+        win.set_resizable(true);
+        win.set_titlebar(Some(&header));
         header.show_all();
 
-        // The content box is the window's opaque "card". The webview's draw
-        // clip below provides the rounded bottom corners without reserving
-        // visible space beneath the page.
+        // The content box is the window's opaque card. Surface clipping and
+        // bottom corners are provided by GTK's CSD decoration node.
         content_vbox.style_context().add_class("card");
         content_vbox.style_context().add_class("rounded");
-
-        // Manual drag-to-move: GTK3 hides a set_titlebar titlebar on an
-        // undecorated window, so the header lives in the content and we move
-        // the window ourselves.
-        setup_drag(&header, &win);
 
         // The app menubar (tauri/muda) is attached to the content box; move it
         // into the titlebar's left side. Handle the case where it was attached
@@ -202,7 +186,7 @@ pub fn apply_custom_frame(
                 let mut lines = Vec::new();
                 dump_widget_tree(tree_win.upcast_ref(), 0, &mut lines);
                 debug!("custom frame: settled widget tree:\n{}", lines.join("\n"));
-                let w = tree_win.downcast_ref::<gtk::Window>().unwrap();
+                let w = &tree_win;
                 debug!(
                     "custom frame: decorated={} mapped={} size={}x{}",
                     w.is_decorated(),
@@ -349,57 +333,6 @@ fn build_titlebar(win: &gtk::Window, app: &tauri::AppHandle) -> gtk::HeaderBar {
     header
 }
 
-/// Left-drag on the titlebar's empty area moves the window. Clicks that land
-/// on interactive children (window buttons, menubar items) are left alone.
-///
-/// The headerbar is a no-window widget, so a press on its empty area is
-/// delivered either to the headerbar itself (if GTK gave it a window) or to
-/// the toplevel window. Install the handler on both; exactly one of them
-/// receives each press.
-fn setup_drag(header: &gtk::HeaderBar, win: &gtk::Window) {
-    let install = |widget: &gtk::Widget, header_ref: gtk::HeaderBar, win_drag: gtk::Window| {
-        widget.connect_button_press_event(move |w, event| {
-            if event.button() != 1 {
-                return Propagation::Proceed;
-            }
-            let hb = header_ref.allocation();
-            let (x, y) = event.position();
-            if !(hb.x() as f64..(hb.x() + hb.width()) as f64).contains(&x)
-                || !(hb.y() as f64..(hb.y() + hb.height()) as f64).contains(&y)
-            {
-                return Propagation::Proceed;
-            }
-            let mut ev = (*event).clone();
-            let Some(widget) = gtk::event_widget(&mut ev) else {
-                return Propagation::Proceed;
-            };
-            // Walk up from the press target; if it reaches a clickable
-            // control, let the click go to it instead of starting a drag.
-            let mut target = Some(widget);
-            while let Some(t) = target {
-                if t.is::<gtk::Button>() || t.is::<gtk::MenuBar>() || t.is::<gtk::MenuItem>() {
-                    return Propagation::Proceed;
-                }
-                let is_window = t == *w.upcast_ref::<gtk::Widget>();
-                target = if is_window { None } else { t.parent() };
-            }
-            if event.event_type() == gdk::EventType::DoubleButtonPress {
-                if win_drag.is_maximized() {
-                    win_drag.unmaximize();
-                } else {
-                    win_drag.maximize();
-                }
-                return Propagation::Stop;
-            }
-            let (root_x, root_y) = event.root();
-            win_drag.begin_move_drag(1, root_x as i32, root_y as i32, event.time());
-            Propagation::Stop
-        });
-    };
-    install(header.upcast_ref(), header.clone(), win.clone());
-    install(win.upcast_ref(), header.clone(), win.clone());
-}
-
 fn build_window_menu(win: &gtk::Window, app: &tauri::AppHandle, maximized: bool) -> gtk::Menu {
     let menu = gtk::Menu::new();
 
@@ -473,11 +406,13 @@ fn chrome_css(dark: bool) -> String {
     let active = if dark { "#4a414c" } else { "#e5dce7" };
     format!(
         r#"
-window, window.csd {{
-  background-color: transparent;
-  background-image: none;
-  box-shadow: none;
-  border: none;
+window.csd decoration {{
+  border-radius: 12px;
+}}
+window.csd.maximized decoration,
+window.csd.fullscreen decoration,
+window.csd.tiled decoration {{
+  border-radius: 0;
 }}
 box.card {{
   background-color: {card_bg};
@@ -760,14 +695,28 @@ fn dump_frame_metrics(w: &gtk::Window) {
     use gtk::prelude::WidgetExt;
     let win_alloc = w.allocation();
     debug!(
-        "frame: window alloc={}x{} visual_depth={} composited={}",
+        "frame: window alloc={}x{} resizable={} decorated={} visual_depth={} composited={}",
         win_alloc.width(),
         win_alloc.height(),
+        w.is_resizable(),
+        w.is_decorated(),
         w.visual().map(|v| v.depth()).unwrap_or(0),
         gtk::prelude::WidgetExt::screen(w)
             .map(|s| s.is_composited())
             .unwrap_or(false)
     );
+    if let Some(titlebar) = w.titlebar() {
+        let (min, natural) = titlebar.preferred_height();
+        let allocation = titlebar.allocation();
+        debug!(
+            "frame: native titlebar type={} preferred_min={} natural={} alloc={}x{}",
+            titlebar.type_().name(),
+            min,
+            natural,
+            allocation.width(),
+            allocation.height()
+        );
+    }
     for child in w.children() {
         if child.is::<gtk::Box>() {
             let children = child.downcast_ref::<gtk::Container>().unwrap().children();

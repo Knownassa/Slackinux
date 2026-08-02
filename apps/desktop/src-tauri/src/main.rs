@@ -16,7 +16,7 @@ mod updates;
 
 use std::env;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU16, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use error::{AppError, AppResult};
 use log::{error, info, warn};
@@ -40,6 +40,11 @@ struct AppState {
     last_update_check_unix: Arc<AtomicI64>,
 }
 
+/// Ordinary workspace/channel links can race the final part of application
+/// setup when a second process is launched during startup. Preserve them until
+/// the renderer has been managed by Tauri.
+static PENDING_SLACK_URLS: OnceLock<Mutex<Vec<Url>>> = OnceLock::new();
+
 impl AppState {
     /// Rebuilds the persisted settings snapshot from the live state.
     fn settings(&self) -> settings::Settings {
@@ -59,6 +64,7 @@ impl AppState {
 }
 
 fn main() -> AppResult<()> {
+    wait_for_restart_parent();
     runtime::prefer_host_webkit_for_appimage();
     diagnostics::init_logging();
 
@@ -90,20 +96,14 @@ fn main() -> AppResult<()> {
         .setup(move |app| {
             #[cfg(target_os = "linux")]
             {
-                use tauri_plugin_deep_link::DeepLinkExt;
-                // AppImages do not have a traditional installer. Registering
-                // here makes normal Slack workspace/channel links work even
-                // when the user launches the AppImage directly or moves it.
-                if let Err(err) = app.deep_link().register_all() {
-                    // Missing desktop-database tools must never prevent Slack
-                    // itself from opening; packaged and shell installs still
-                    // carry the static MIME association.
-                    warn!("could not register Slack browser callback handler: {err}");
-                }
+                // AppImages do not have a traditional installer. Repair the
+                // stable launcher on every start so moving the AppImage or
+                // updating it cannot leave Slack links pointing at an
+                // obsolete mount path or the compatibility dynamic loader.
                 if let Err(err) = deep_links::ensure_linux_handler() {
-                    warn!("could not repair Slack browser callback handler: {err}");
+                    warn!("could not repair Slack URL handler: {err}");
                 } else {
-                    info!("Slack browser callback handler is registered");
+                    info!("Slack URL handler is registered");
                 }
             }
 
@@ -144,8 +144,11 @@ fn main() -> AppResult<()> {
             )
             .title("Slackinux")
             .inner_size(1280.0, 800.0)
-            .decorations(false)
-            .transparent(true)
+            .min_inner_size(800.0, 560.0)
+            .resizable(true)
+            .decorations(true)
+            .transparent(false)
+            .visible(false)
             .theme(match user_settings.theme_preference {
                 settings::ThemePreference::System => None,
                 settings::ThemePreference::Light => Some(tauri::Theme::Light),
@@ -175,8 +178,12 @@ fn main() -> AppResult<()> {
                 .item(&tray_quit)
                 .build()?;
 
+            let tray_icon = app
+                .default_window_icon()
+                .cloned()
+                .ok_or_else(|| AppError::Other("the bundled application icon is missing".into()))?;
             let tray = TrayIconBuilder::new()
-                .icon(app.default_window_icon().unwrap().clone())
+                .icon(tray_icon)
                 .tooltip("Slackinux")
                 .menu(&tray_menu)
                 .show_menu_on_left_click(true)
@@ -284,14 +291,24 @@ fn main() -> AppResult<()> {
                 .accelerator("Alt+Right")
                 .build(app)?;
             let login_in_app =
-                MenuItemBuilder::with_id("login_in_app", "Sign In to Slack").build(app)?;
-            let dnd_toggle = MenuItemBuilder::with_id("dnd_toggle", "Do Not Disturb")
-                .accelerator("CmdOrCtrl+D")
-                .build(app)?;
+                MenuItemBuilder::with_id("login_in_app", "Sign In / Add Workspace…").build(app)?;
+            let dnd_toggle = tauri::menu::CheckMenuItemBuilder::with_id(
+                "dnd_toggle",
+                "Do Not Disturb",
+            )
+            .checked(user_settings.dnd)
+            .accelerator("CmdOrCtrl+D")
+            .build(app)?;
             let clear_cache = MenuItemBuilder::with_id("clear_cache", "Clear Cache & Restart")
                 .build(app)?;
             let check_updates =
                 MenuItemBuilder::with_id("check_updates", "Check for Updates…").build(app)?;
+            let auto_updates = tauri::menu::CheckMenuItemBuilder::with_id(
+                "auto_updates",
+                "Check Automatically",
+            )
+            .checked(user_settings.auto_check_updates)
+            .build(app)?;
             let release_notes =
                 MenuItemBuilder::with_id("release_notes", "Release Notes").build(app)?;
             let open_logs =
@@ -395,6 +412,7 @@ fn main() -> AppResult<()> {
 
             let help_menu = SubmenuBuilder::new(app, "Help")
                 .item(&check_updates)
+                .item(&auto_updates)
                 .item(&release_notes)
                 .separator()
                 .item(&diagnostics_menu)
@@ -446,6 +464,9 @@ fn main() -> AppResult<()> {
                 .unwrap_or(slack_url);
             info!("navigating to Slack URL");
             renderer.navigate(initial_url.as_str())?;
+            drain_pending_slack_urls(&handle);
+
+            window.show().map_err(AppError::Tauri)?;
 
             updates::schedule_startup_check(app.handle().clone());
 
@@ -508,10 +529,25 @@ fn main() -> AppResult<()> {
                 "login_in_app" => {
                     let state = app.state::<AppState>();
                     info!("opening Slack sign-in in the app");
-                    let _ = state.renderer.navigate("https://app.slack.com/signin");
+                    if let Err(err) = state.renderer.navigate("https://app.slack.com/signin") {
+                        use tauri_plugin_dialog::DialogExt;
+                        error!("failed to open in-app Slack sign-in: {err}");
+                        app.dialog()
+                            .message(format!("Slackinux could not open Slack sign-in.\n\n{err}"))
+                            .title("Slackinux — Sign In")
+                            .kind(tauri_plugin_dialog::MessageDialogKind::Error)
+                            .show(|_| {});
+                    }
                 }
                 "check_updates" => {
                     updates::check_for_updates(app.clone(), updates::UpdateCheckReason::Manual);
+                }
+                "auto_updates" => {
+                    let state = app.state::<AppState>();
+                    let enabled = !state.auto_check_updates.load(Ordering::Relaxed);
+                    state.auto_check_updates.store(enabled, Ordering::Relaxed);
+                    state.settings().save(&state.data_dir);
+                    info!("automatic update checks: {enabled}");
                 }
                 "release_notes" => {
                     if let Err(err) =
@@ -532,14 +568,7 @@ fn main() -> AppResult<()> {
                 "clear_cache" => {
                     let state = app.state::<AppState>();
                     let _ = state.renderer.clear_cache();
-                    if let Ok(exe) = std::env::current_exe() {
-                        let _ = std::process::Command::new(exe).spawn();
-                    }
-                    let app_clone = app.clone();
-                    std::thread::spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_millis(800));
-                        app_clone.exit(0);
-                    });
+                    restart_app(app);
                 }
                 "gpu_auto" | "gpu_integrated" | "gpu_discrete" => {
                     use tauri_plugin_dialog::DialogExt;
@@ -579,14 +608,7 @@ fn main() -> AppResult<()> {
                     info!("theme preference: {preference}");
                 }
                 "gpu_restart" => {
-                    if let Ok(exe) = std::env::current_exe() {
-                        let _ = std::process::Command::new(exe).spawn();
-                    }
-                    let app_clone = app.clone();
-                    std::thread::spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_millis(800));
-                        app_clone.exit(0);
-                    });
+                    restart_app(app);
                 }
                 "tray_show" => {
                     if let Some(window) = app.get_webview_window("main") {
@@ -720,12 +742,100 @@ fn handle_slack_launch_args(app: &tauri::AppHandle, args: &[String]) {
         return;
     };
     let Some(state) = app.try_state::<AppState>() else {
-        warn!("Slack callback arrived before the renderer was ready");
+        warn!("Slack URL arrived before the renderer was ready; queued it");
+        PENDING_SLACK_URLS
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(url);
         return;
     };
-    info!("opening Slack browser callback in Slackinux");
+    open_slack_url(&state, &url);
+}
+
+fn open_slack_url(state: &AppState, url: &Url) {
+    info!("opening Slack deep link in Slackinux");
     if let Err(err) = state.renderer.navigate(url.as_str()) {
-        error!("failed to open Slack browser callback: {err}");
+        error!("failed to open Slack deep link: {err}");
+    }
+}
+
+fn drain_pending_slack_urls(app: &tauri::AppHandle) {
+    let Some(pending) = PENDING_SLACK_URLS.get() else {
+        return;
+    };
+    let urls = std::mem::take(
+        &mut *pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+    );
+    if urls.is_empty() {
+        return;
+    }
+    let state = app.state::<AppState>();
+    info!("processing {} queued Slack URL(s)", urls.len());
+    for url in urls {
+        open_slack_url(&state, &url);
+    }
+}
+
+/// Spawn the stable AppImage path (when present), then let the child wait for
+/// this single-instance process to exit before creating GTK/WebKit objects.
+pub(crate) fn restart_app(app: &tauri::AppHandle) {
+    let executable = std::env::var_os("APPIMAGE")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_exe().ok());
+    let Some(executable) = executable else {
+        show_restart_error(app, "could not determine the executable");
+        return;
+    };
+    if let Err(error) = std::process::Command::new(executable)
+        .arg("--restart-after-pid")
+        .arg(std::process::id().to_string())
+        .spawn()
+    {
+        show_restart_error(app, &error.to_string());
+        return;
+    }
+
+    let app = app.clone();
+    std::thread::spawn(move || {
+        // Give asynchronous cache writes and the new AppImage process time to
+        // initialize before the old single-instance owner exits.
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        app.exit(0);
+    });
+}
+
+fn show_restart_error(app: &tauri::AppHandle, error: &str) {
+    use tauri_plugin_dialog::DialogExt;
+    error!("restart failed: {error}");
+    app.dialog()
+        .message(format!(
+            "Slackinux could not restart automatically.\n\n{error}\n\nQuit and open Slackinux again to apply the change."
+        ))
+        .title("Slackinux — Restart Failed")
+        .kind(tauri_plugin_dialog::MessageDialogKind::Error)
+        .show(|_| {});
+}
+
+fn wait_for_restart_parent() {
+    let args = std::env::args().collect::<Vec<_>>();
+    let Some(index) = args.iter().position(|arg| arg == "--restart-after-pid") else {
+        return;
+    };
+    let Some(pid) = args
+        .get(index + 1)
+        .and_then(|value| value.parse::<u32>().ok())
+    else {
+        return;
+    };
+    let process = std::path::PathBuf::from(format!("/proc/{pid}"));
+    for _ in 0..100 {
+        if !process.exists() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
 

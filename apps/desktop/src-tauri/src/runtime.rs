@@ -73,12 +73,30 @@ fn bundled_runtime_variables() -> &'static [&'static str] {
         "APPDIR",
         "LD_LIBRARY_PATH",
         "GTK_DATA_PREFIX",
+        "GTK_EXE_PREFIX",
         "GTK_PATH",
         "GTK_THEME",
+        "GTK_THEME_VARIANT",
+        "APPIMAGE_GTK_THEME",
         "GTK_IM_MODULE_FILE",
         "GDK_PIXBUF_MODULE_FILE",
         "GIO_EXTRA_MODULES",
         "GSETTINGS_SCHEMA_DIR",
+        // linuxdeploy also exports paths to its bundled multimedia stack.
+        // Keeping those variables while loading the host WebKit makes the
+        // host GStreamer process scan incompatible AppImage plugins, which can
+        // leave the webview blank. Let the host runtime discover host plugins.
+        "GST_PLUGIN_PATH",
+        "GST_PLUGIN_PATH_1_0",
+        "GST_PLUGIN_SCANNER",
+        "GST_PLUGIN_SCANNER_1_0",
+        "GST_PLUGIN_SYSTEM_PATH",
+        "GST_PLUGIN_SYSTEM_PATH_1_0",
+        "GST_PTP_HELPER",
+        "GST_PTP_HELPER_1_0",
+        "GST_REGISTRY",
+        "GST_REGISTRY_1_0",
+        "GST_REGISTRY_REUSE_PLUGIN_SCANNER",
         "XDG_DATA_DIRS",
     ]
 }
@@ -111,6 +129,9 @@ mod tests {
     #[test]
     fn bundled_runtime_variables_include_appdir_loop_guard() {
         assert!(bundled_runtime_variables().contains(&"APPDIR"));
+        assert!(bundled_runtime_variables().contains(&"GTK_EXE_PREFIX"));
+        assert!(bundled_runtime_variables().contains(&"GST_PLUGIN_SCANNER"));
+        assert!(bundled_runtime_variables().contains(&"GST_PLUGIN_PATH"));
     }
 
     #[test]

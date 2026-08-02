@@ -4,6 +4,18 @@ All notable changes to Slackinux are documented here.
 
 ## Unreleased
 
+- Restored dependable edge and corner resizing, compositor shadows, tiling,
+  maximization, and rounded window geometry by using GTK's native custom
+  titlebar/client-side decoration path.
+- Consolidated sign-in and SSO into Slackinux's isolated, cookie-sharing
+  webview and popup flow.
+- Prevented AppImage host-WebKit launches from inheriting incompatible bundled
+  GStreamer plugin paths, avoiding another source of blank webviews.
+- Made the per-user installer remove obsolete versioned Slackinux launchers
+  that could silently restart an older AppImage.
+- Fixed recovery pages, AppImage-aware restarts, duplicate download naming,
+  and exposed visible DND/automatic-update check states in the app menus.
+
 ## 0.2.5 - 2026-08-02
 
 - Fixed AppImage host-runtime selection by bypassing the packaged binary's
@@ -19,8 +31,8 @@ All notable changes to Slackinux are documented here.
   WebKitGTK 4.1 runtime on all distributions.
 - Added `%U` to packaged launchers and a self-healing `slack://` desktop
   handler for ordinary workspace and channel deep links.
-- Removed the unreliable external-browser sign-in action. Slackinux now uses
-  only its cookie-sharing in-app sign-in and SSO popup flow.
+- Consolidated authentication into the cookie-sharing in-app sign-in and SSO
+  popup flow.
 - Added Slack-origin-restricted camera and microphone permissions and bundled
   AppImage media frameworks; active WebKit audio now postpones updates, while
   Huddles remain experimental.

@@ -341,7 +341,7 @@ fn install_update(app: tauri::AppHandle, update: Update, guard: UpdateLockGuard)
         match result {
             Ok(()) => {
                 info!("updates: installed; restarting Slackinux");
-                progress_app.restart();
+                crate::restart_app(&progress_app);
             }
             Err(UpdateError::Install(message)) => {
                 error!("updates: install failed: {message}");
