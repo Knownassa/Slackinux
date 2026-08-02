@@ -48,6 +48,8 @@ struct AppState {
     permission_broker: Arc<permissions::PermissionBroker>,
     #[cfg(target_os = "linux")]
     media_activity: Arc<renderer::webkit::MediaActivity>,
+    #[cfg(target_os = "linux")]
+    huddle_browser: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 /// Ordinary workspace/channel links can race the final part of application
@@ -66,6 +68,8 @@ impl AppState {
             theme_preference: *self.theme_preference.lock().unwrap(),
             auto_check_updates: self.auto_check_updates.load(Ordering::Relaxed),
             last_update_check_unix: self.last_update_check_unix.load(Ordering::Relaxed),
+            #[cfg(target_os = "linux")]
+            huddle_browser: self.huddle_browser.lock().unwrap().clone(),
         }
     }
 
@@ -279,6 +283,9 @@ fn main() -> AppResult<()> {
             let handle = app.handle().clone();
             let graphics_mode =
                 Arc::new(std::sync::Mutex::new(user_settings.graphics_mode));
+            #[cfg(target_os = "linux")]
+            let huddle_browser =
+                Arc::new(std::sync::Mutex::new(user_settings.huddle_browser.clone()));
             handle.manage(AppState {
                 renderer: renderer.clone(),
                 notif_mgr: notif_mgr.clone(),
@@ -294,6 +301,8 @@ fn main() -> AppResult<()> {
                 permission_broker: permission_broker.clone(),
                 #[cfg(target_os = "linux")]
                 media_activity: media_activity.clone(),
+                #[cfg(target_os = "linux")]
+                huddle_browser: huddle_browser.clone(),
             });
 
             // --- App menu: Slack-desktop-style (File/Edit/View/History/Window/
@@ -696,7 +705,9 @@ fn main() -> AppResult<()> {
                 }
                 "open_huddle_in_browser" => {
                     use tauri_plugin_dialog::DialogExt;
-                    match huddle_browser::find_browser() {
+                    let state = app.state::<AppState>();
+                    let configured = state.huddle_browser.lock().unwrap().clone();
+                    match huddle_browser::resolve_browser(configured.as_deref()) {
                         Some((browser, kind)) => {
                             let url = huddle_browser::huddle_launch_url();
                             info!("opening Huddle in {}: {}", kind.name(), browser.display());

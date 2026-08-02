@@ -70,6 +70,11 @@ pub struct Settings {
     pub auto_check_updates: bool,
     #[serde(default)]
     pub last_update_check_unix: i64,
+    /// Optional path to a custom browser executable used for the on-demand
+    /// "Open Huddle in Browser" action. When empty, the browser is found on
+    /// PATH. The value is validated against a closed allow-list before use.
+    #[serde(default)]
+    pub huddle_browser: Option<String>,
 }
 
 /// The pre-0.4 GPU preference values, kept only for migration.
@@ -105,6 +110,7 @@ impl Default for Settings {
             theme_preference: ThemePreference::System,
             auto_check_updates: true,
             last_update_check_unix: 0,
+            huddle_browser: None,
         }
     }
 }
@@ -158,6 +164,7 @@ mod tests {
         assert_eq!(settings.theme_preference, ThemePreference::System);
         assert!(settings.auto_check_updates);
         assert_eq!(settings.last_update_check_unix, 0);
+        assert!(settings.huddle_browser.is_none());
     }
 
     #[test]
@@ -174,6 +181,7 @@ mod tests {
             theme_preference: ThemePreference::Dark,
             auto_check_updates: false,
             last_update_check_unix: 1_700_000_000,
+            huddle_browser: Some("/usr/bin/chromium".into()),
         };
         settings.save(&dir);
 
@@ -184,6 +192,7 @@ mod tests {
         assert_eq!(loaded.theme_preference, ThemePreference::Dark);
         assert!(!loaded.auto_check_updates);
         assert_eq!(loaded.last_update_check_unix, 1_700_000_000);
+        assert_eq!(loaded.huddle_browser.as_deref(), Some("/usr/bin/chromium"));
     }
 
     #[test]

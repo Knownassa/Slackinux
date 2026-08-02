@@ -5,9 +5,10 @@
 //! only an explicit user action (menu item) triggers this path.
 //!
 //! Security rules enforced here:
-//! - Only known, validated browser executables are ever spawned.
-//! - Executable paths are validated against a fixed allow-list of binaries,
-//!   never arbitrary strings from the page or from settings.
+//! - Browsers found on PATH are restricted to a closed allow-list of known
+//!   binaries, never arbitrary strings from the page or from settings.
+//! - A user-configured executable path is honored only when it exists and is
+//!   executable; it is still a fixed path, never a command string.
 //! - Slack session state is never passed on the command line. The browser is
 //!   opened to a workspace-neutral Huddle URL at most; the user's existing
 //!   session in that browser is what Slack uses.
@@ -54,6 +55,22 @@ pub fn find_browser() -> Option<(PathBuf, Browser)> {
     KNOWN_BROWSERS
         .iter()
         .find_map(|(name, kind)| which_on_path(name).map(|path| (path, *kind)))
+}
+
+/// Resolves the executable to use for the "Open Huddle in Browser" action.
+///
+/// A configured path is honored only when it resolves to an existing
+/// executable; the value is a filesystem path chosen by the user, so it is
+/// validated for existence and executability but is not restricted to the
+/// known-browser list. Falls back to [`find_browser`] when unset or invalid.
+pub fn resolve_browser(configured: Option<&str>) -> Option<(PathBuf, Browser)> {
+    if let Some(path) = configured
+        .map(PathBuf::from)
+        .filter(|path| path.is_file() && is_executable(path))
+    {
+        return Some((path, Browser::Chromium));
+    }
+    find_browser()
 }
 
 /// Returns the resolved path of `name` on PATH, or `None` if missing.
@@ -142,5 +159,37 @@ mod tests {
             );
             assert!(Path::new(name).is_relative());
         }
+    }
+
+    #[test]
+    fn configured_path_must_exist_and_be_executable() {
+        // With an empty PATH there is nothing to fall back to.
+        let saved_path = std::env::var_os("PATH");
+        std::env::remove_var("PATH");
+        let restore = || {
+            if let Some(path) = &saved_path {
+                std::env::set_var("PATH", path);
+            }
+        };
+
+        // A missing configured path yields nothing.
+        assert!(resolve_browser(Some("/nonexistent/browser")).is_none());
+        assert!(resolve_browser(Some("")).is_none());
+
+        // A real executable is honored even when PATH is empty.
+        let dir = std::env::temp_dir().join(format!(
+            "slackinux-huddle-browser-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("fake-browser");
+        std::fs::write(&exe, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&exe, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let resolved = resolve_browser(exe.to_str());
+        restore();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(resolved.is_some());
+        assert_eq!(resolved.unwrap().0, exe);
     }
 }
