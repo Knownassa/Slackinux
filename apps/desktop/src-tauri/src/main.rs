@@ -7,8 +7,14 @@ mod error;
 mod frame;
 #[cfg(target_os = "linux")]
 mod gpu;
+#[cfg(target_os = "linux")]
+mod huddle_browser;
+#[cfg(target_os = "linux")]
+mod huddles;
 mod navigation;
 mod notifications;
+#[cfg(target_os = "linux")]
+mod permissions;
 mod renderer;
 mod runtime;
 mod settings;
@@ -34,10 +40,16 @@ struct AppState {
     notif_mgr: Arc<NotificationManager>,
     data_dir: std::path::PathBuf,
     zoom_level: Arc<AtomicU16>,
-    gpu_preference: Arc<std::sync::Mutex<settings::GpuPreference>>,
+    graphics_mode: Arc<std::sync::Mutex<settings::GraphicsMode>>,
     theme_preference: Arc<std::sync::Mutex<settings::ThemePreference>>,
     auto_check_updates: Arc<AtomicBool>,
     last_update_check_unix: Arc<AtomicI64>,
+    #[cfg(target_os = "linux")]
+    permission_broker: Arc<permissions::PermissionBroker>,
+    #[cfg(target_os = "linux")]
+    media_activity: Arc<renderer::webkit::MediaActivity>,
+    #[cfg(target_os = "linux")]
+    huddle_browser: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 /// Ordinary workspace/channel links can race the final part of application
@@ -51,10 +63,13 @@ impl AppState {
         settings::Settings {
             zoom_level: self.zoom_level.load(Ordering::Relaxed),
             dnd: self.notif_mgr.is_dnd(),
-            gpu_preference: *self.gpu_preference.lock().unwrap(),
+            graphics_mode: *self.graphics_mode.lock().unwrap(),
+            gpu_preference: None,
             theme_preference: *self.theme_preference.lock().unwrap(),
             auto_check_updates: self.auto_check_updates.load(Ordering::Relaxed),
             last_update_check_unix: self.last_update_check_unix.load(Ordering::Relaxed),
+            #[cfg(target_os = "linux")]
+            huddle_browser: self.huddle_browser.lock().unwrap().clone(),
         }
     }
 
@@ -90,7 +105,16 @@ fn main() -> AppResult<()> {
             }
         }))
         .plugin(tauri_plugin_deep_link::init())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                // The custom GTK titlebar owns decoration state; restoring a
+                // stale `decorated` flag collapses the frame to 1x1.
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::all()
+                        .difference(tauri_plugin_window_state::StateFlags::DECORATIONS),
+                )
+                .build(),
+        )
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
@@ -125,7 +149,8 @@ fn main() -> AppResult<()> {
 
             #[cfg(target_os = "linux")]
             {
-                gpu::apply(user_settings.gpu_preference);
+                let applied = gpu::apply(user_settings.graphics_mode, &data_dir);
+                info!("graphics: {}", applied.describe());
             }
 
             #[cfg(target_os = "linux")]
@@ -137,7 +162,18 @@ fn main() -> AppResult<()> {
                 .parse::<Url>()
                 .map_err(|e| AppError::InvalidUrl(e.to_string()))?;
 
-            let window = WebviewWindowBuilder::new(
+            // Profile-bound WebContext: cookies/session for the main webview
+            // (and any SSO popups that use the same data directory) persist
+            // under the app profile rather than WebKit's global default
+            // location. If the directory cannot be prepared, fall back to a
+            // fresh context instead of panicking.
+            let webkit_data_dir = data_dir.join("webkit");
+            let shared_context = std::fs::create_dir_all(&webkit_data_dir).is_ok();
+            if !shared_context {
+                warn!("WebKit data directory unavailable; using a fresh session context");
+            }
+
+            let window_builder = WebviewWindowBuilder::new(
                 app,
                 "main",
                 WebviewUrl::App("bootstrap/index.html".into()),
@@ -153,14 +189,15 @@ fn main() -> AppResult<()> {
                 settings::ThemePreference::System => None,
                 settings::ThemePreference::Light => Some(tauri::Theme::Light),
                 settings::ThemePreference::Dark => Some(tauri::Theme::Dark),
-            })
-            .build()
-            .map_err(AppError::Tauri)?;
+            });
+            let window_builder = if shared_context {
+                window_builder.data_directory(webkit_data_dir.clone())
+            } else {
+                window_builder
+            };
+            let window = window_builder.build().map_err(AppError::Tauri)?;
 
             let theme_preference = Arc::new(std::sync::Mutex::new(user_settings.theme_preference));
-
-            #[cfg(target_os = "linux")]
-            frame::apply_custom_frame(app.handle(), &window, theme_preference.clone());
 
             let download_dir = data_dir.join("downloads");
             std::fs::create_dir_all(&download_dir).ok();
@@ -208,7 +245,25 @@ fn main() -> AppResult<()> {
                 .build(app)?;
 
             // --- Renderer ---
-            let renderer = Arc::new(WebKitRenderer::new(window.clone(), download_dir));
+            let renderer = Arc::new(WebKitRenderer::new(
+                window.clone(),
+                download_dir,
+                data_dir.clone(),
+            ));
+
+            #[cfg(target_os = "linux")]
+            let permission_broker = {
+                let broker = Arc::new(permissions::PermissionBroker::load(&data_dir));
+                info!(
+                    "media permission broker: loaded, {} managed permission(s)",
+                    broker.managed_total()
+                );
+                broker
+            };
+
+            #[cfg(target_os = "linux")]
+            let media_activity =
+                Arc::new(renderer::webkit::MediaActivity::default());
 
             #[cfg(target_os = "linux")]
             {
@@ -227,22 +282,34 @@ fn main() -> AppResult<()> {
                     },
                     notif_mgr.clone(),
                     handle,
+                    permission_broker.clone(),
+                    media_activity.clone(),
                 );
             }
 
             let handle = app.handle().clone();
-            let gpu_pref = Arc::new(std::sync::Mutex::new(user_settings.gpu_preference));
+            let graphics_mode =
+                Arc::new(std::sync::Mutex::new(user_settings.graphics_mode));
+            #[cfg(target_os = "linux")]
+            let huddle_browser =
+                Arc::new(std::sync::Mutex::new(user_settings.huddle_browser.clone()));
             handle.manage(AppState {
                 renderer: renderer.clone(),
                 notif_mgr: notif_mgr.clone(),
                 data_dir: data_dir.clone(),
                 zoom_level: zoom_level.clone(),
-                gpu_preference: gpu_pref,
+                graphics_mode,
                 theme_preference: theme_preference.clone(),
                 auto_check_updates: Arc::new(AtomicBool::new(user_settings.auto_check_updates)),
                 last_update_check_unix: Arc::new(AtomicI64::new(
                     user_settings.last_update_check_unix,
                 )),
+                #[cfg(target_os = "linux")]
+                permission_broker: permission_broker.clone(),
+                #[cfg(target_os = "linux")]
+                media_activity: media_activity.clone(),
+                #[cfg(target_os = "linux")]
+                huddle_browser: huddle_browser.clone(),
             });
 
             // --- App menu: Slack-desktop-style (File/Edit/View/History/Window/
@@ -315,14 +382,24 @@ fn main() -> AppResult<()> {
                 MenuItemBuilder::with_id("open_logs", "Open Log Folder").build(app)?;
             let copy_diagnostics =
                 MenuItemBuilder::with_id("copy_diagnostics", "Copy Diagnostic Info").build(app)?;
+            #[cfg(target_os = "linux")]
+            let huddle_diagnostic = MenuItemBuilder::with_id(
+                "huddle_diagnostic",
+                "Huddle Compatibility Check…",
+            )
+            .build(app)?;
             let report_issue =
                 MenuItemBuilder::with_id("report_issue", "Report an Issue…").build(app)?;
-            let diagnostics_menu = SubmenuBuilder::new(app, "Diagnostics")
-                .item(&open_logs)
-                .item(&copy_diagnostics)
-                .separator()
-                .item(&report_issue)
-                .build()?;
+            let diagnostics_menu = {
+                let mut builder = SubmenuBuilder::new(app, "Diagnostics")
+                    .item(&open_logs)
+                    .item(&copy_diagnostics);
+                #[cfg(target_os = "linux")]
+                {
+                    builder = builder.item(&huddle_diagnostic);
+                }
+                builder.separator().item(&report_issue).build()?
+            };
             let about = MenuItemBuilder::with_id("about", "About Slackinux").build(app)?;
             let win_minimize = MenuItemBuilder::with_id("win_minimize", "Minimize")
                 .accelerator("CmdOrCtrl+M")
@@ -351,17 +428,31 @@ fn main() -> AppResult<()> {
             #[cfg(target_os = "linux")]
             let graphics_menu = {
                 use tauri::menu::CheckMenuItemBuilder;
-                let gpu_auto = CheckMenuItemBuilder::with_id("gpu_auto", "Auto (recommended)")
-                    .checked(user_settings.gpu_preference == settings::GpuPreference::Auto)
+                let gpu_auto = CheckMenuItemBuilder::with_id("gpu_auto", "Automatic")
+                    .checked(user_settings.graphics_mode == settings::GraphicsMode::Automatic)
                     .build(app)?;
-                let gpu_integrated =
-                    CheckMenuItemBuilder::with_id("gpu_integrated", "Integrated GPU")
-                        .checked(user_settings.gpu_preference == settings::GpuPreference::Integrated)
+                let gpu_efficient =
+                    CheckMenuItemBuilder::with_id("gpu_efficient", "Efficient (Integrated GPU)")
+                        .checked(user_settings.graphics_mode == settings::GraphicsMode::Efficient)
                         .build(app)?;
-                let gpu_discrete =
-                    CheckMenuItemBuilder::with_id("gpu_discrete", "Discrete GPU")
-                        .checked(user_settings.gpu_preference == settings::GpuPreference::Discrete)
+                let gpu_performance =
+                    CheckMenuItemBuilder::with_id("gpu_performance", "Performance (Discrete GPU)")
+                        .checked(user_settings.graphics_mode == settings::GraphicsMode::Performance)
                         .build(app)?;
+                let gpu_compatibility = CheckMenuItemBuilder::with_id(
+                    "gpu_compatibility",
+                    "Compatibility (no DMABUF)",
+                )
+                .checked(user_settings.graphics_mode == settings::GraphicsMode::Compatibility)
+                .build(app)?;
+                let gpu_software = CheckMenuItemBuilder::with_id("gpu_software", "Software")
+                    .checked(user_settings.graphics_mode == settings::GraphicsMode::Software)
+                    .build(app)?;
+                let gpu_reset = MenuItemBuilder::with_id(
+                    "gpu_reset",
+                    "Reset Graphics Troubleshooting",
+                )
+                .build(app)?;
                 let gpu_restart = MenuItemBuilder::with_id(
                     "gpu_restart",
                     "Restart to Apply Graphics Changes",
@@ -369,10 +460,32 @@ fn main() -> AppResult<()> {
                 .build(app)?;
                 SubmenuBuilder::with_id(app, "graphics", "Graphics")
                     .item(&gpu_auto)
-                    .item(&gpu_integrated)
-                    .item(&gpu_discrete)
+                    .item(&gpu_efficient)
+                    .item(&gpu_performance)
+                    .item(&gpu_compatibility)
+                    .item(&gpu_software)
                     .separator()
+                    .item(&gpu_reset)
                     .item(&gpu_restart)
+                    .build()?
+            };
+
+            #[cfg(target_os = "linux")]
+            let media_menu = {
+                let reset_media = MenuItemBuilder::with_id(
+                    "reset_media_permissions",
+                    "Reset Media & Notification Permissions",
+                )
+                .build(app)?;
+                let huddle_browser = MenuItemBuilder::with_id(
+                    "open_huddle_in_browser",
+                    "Open Huddle in Browser…",
+                )
+                .build(app)?;
+                SubmenuBuilder::with_id(app, "media", "Media")
+                    .item(&reset_media)
+                    .separator()
+                    .item(&huddle_browser)
                     .build()?
             };
 
@@ -442,8 +555,15 @@ fn main() -> AppResult<()> {
             if let Some(menu) = app.menu() {
                 #[cfg(target_os = "linux")]
                 menu.append(&graphics_menu)?;
+                #[cfg(target_os = "linux")]
+                menu.append(&media_menu)?;
                 menu.append(&account_menu)?;
             }
+
+            // The custom frame runs after the app menu is set so the menubar is
+            // already attached and can be reparented without polling.
+            #[cfg(target_os = "linux")]
+            frame::apply_custom_frame(app.handle(), &window, theme_preference.clone());
 
             // --- Close to tray ---
             let window_clone = window.clone();
@@ -559,6 +679,11 @@ fn main() -> AppResult<()> {
                 "open_logs" => diagnostics::open_log_folder(app),
                 "copy_diagnostics" => diagnostics::copy_support_report(app),
                 "report_issue" => diagnostics::report_issue(app),
+                #[cfg(target_os = "linux")]
+                "huddle_diagnostic" => {
+                    let app = app.clone();
+                    run_huddle_diagnostic(&app);
+                }
                 "dnd_toggle" => {
                     let state = app.state::<AppState>();
                     let dnd = !state.notif_mgr.is_dnd();
@@ -570,23 +695,92 @@ fn main() -> AppResult<()> {
                     let _ = state.renderer.clear_cache();
                     restart_app(app);
                 }
-                "gpu_auto" | "gpu_integrated" | "gpu_discrete" => {
+                "reset_media_permissions" => {
                     use tauri_plugin_dialog::DialogExt;
                     let state = app.state::<AppState>();
-                    let pref = match id {
-                        "gpu_auto" => settings::GpuPreference::Auto,
-                        "gpu_integrated" => settings::GpuPreference::Integrated,
-                        _ => settings::GpuPreference::Discrete,
+                    state.permission_broker.reset_all();
+                    info!("media and notification permissions reset");
+                    app.dialog()
+                        .message(
+                            "All camera, microphone, screen-sharing and notification \
+                             permissions have been reset.\n\nSlackinux will ask again the \
+                             next time they are requested.",
+                        )
+                        .title("Slackinux — Media Permissions")
+                        .kind(tauri_plugin_dialog::MessageDialogKind::Info)
+                        .show(|_| {});
+                }
+                "open_huddle_in_browser" => {
+                    use tauri_plugin_dialog::DialogExt;
+                    let state = app.state::<AppState>();
+                    let configured = state.huddle_browser.lock().unwrap().clone();
+                    match huddle_browser::resolve_browser(configured.as_deref()) {
+                        Some((browser, kind)) => {
+                            let url = huddle_browser::huddle_launch_url();
+                            info!("opening Huddle in {}: {}", kind.name(), browser.display());
+                            if let Err(error) = huddle_browser::open_in_browser(&browser, &url) {
+                                error!("could not open Huddle in browser: {error}");
+                                app.dialog()
+                                    .message(format!(
+                                        "Could not open the Huddle in {}. Please open \
+                                         https://app.slack.com/huddle/new manually.\n\n{error}",
+                                        kind.name()
+                                    ))
+                                    .title("Slackinux — Huddle")
+                                    .kind(tauri_plugin_dialog::MessageDialogKind::Error)
+                                    .show(|_| {});
+                            }
+                        }
+                        None => {
+                            info!("open Huddle in browser: no supported browser found");
+                            app.dialog()
+                                .message(
+                                    "No supported browser was found on PATH.\n\nInstall \
+                                     Google Chrome, Chromium, or Brave, then try again.",
+                                )
+                                .title("Slackinux — Huddle")
+                                .kind(tauri_plugin_dialog::MessageDialogKind::Error)
+                                .show(|_| {});
+                        }
+                    }
+                }
+                "gpu_auto"
+                | "gpu_efficient"
+                | "gpu_performance"
+                | "gpu_compatibility"
+                | "gpu_software" => {
+                    use tauri_plugin_dialog::DialogExt;
+                    let state = app.state::<AppState>();
+                    let mode = match id {
+                        "gpu_auto" => settings::GraphicsMode::Automatic,
+                        "gpu_efficient" => settings::GraphicsMode::Efficient,
+                        "gpu_performance" => settings::GraphicsMode::Performance,
+                        "gpu_compatibility" => settings::GraphicsMode::Compatibility,
+                        _ => settings::GraphicsMode::Software,
                     };
-                    *state.gpu_preference.lock().unwrap() = pref;
+                    *state.graphics_mode.lock().unwrap() = mode;
                     state.settings().save(&state.data_dir);
-                    set_graphics_checks(app, pref);
-                    info!("graphics preference: {pref} (applies after restart)");
+                    set_graphics_checks(app, mode);
+                    info!("graphics mode: {mode} (applies after restart)");
                     app.dialog()
                         .message(format!(
-                            "Graphics preference set to {pref}.\n\nIt takes effect on the next \
+                            "Graphics mode set to {mode}.\n\nIt takes effect on the next \
                              launch of Slackinux."
                         ))
+                        .title("Slackinux — Graphics")
+                        .kind(tauri_plugin_dialog::MessageDialogKind::Info)
+                        .show(|_| {});
+                }
+                "gpu_reset" => {
+                    use tauri_plugin_dialog::DialogExt;
+                    let state = app.state::<AppState>();
+                    gpu::reset_troubleshooting(&state.data_dir);
+                    info!("graphics troubleshooting state cleared");
+                    app.dialog()
+                        .message(
+                            "Cleared the per-device crash-recovery state.\n\nSlackinux will \
+                             start fresh on the next launch.",
+                        )
                         .title("Slackinux — Graphics")
                         .kind(tauri_plugin_dialog::MessageDialogKind::Info)
                         .show(|_| {});
@@ -727,6 +921,26 @@ fn detect_portal() -> &'static str {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn run_huddle_diagnostic(app: &tauri::AppHandle) {
+    use tauri_plugin_dialog::DialogExt;
+    let app = app.clone();
+    let state = app.state::<AppState>();
+    let mut report = huddles::probe_environment();
+    let renderer = state.renderer.clone();
+    info!("Huddle diagnostic: initial probe complete");
+    renderer.probe_media_codecs(Box::new(move |codec_payload| {
+        huddles::apply_codec_results(&mut report, codec_payload.as_deref());
+        let summary = huddles::describe(&report);
+        info!("Huddle diagnostic: {}", report.classify().label());
+        app.dialog()
+            .message(format!("{summary}\n\nNo Slack messages, cookies, tokens, or workspace content are included."))
+            .title(format!("Huddle Compatibility — {}", report.classify().label()))
+            .kind(tauri_plugin_dialog::MessageDialogKind::Info)
+            .show(|_| {});
+    }));
+}
+
 fn parse_unread_count(title: &str) -> u32 {
     let title = title.trim();
     if title.starts_with('(') {
@@ -839,8 +1053,8 @@ fn wait_for_restart_parent() {
     }
 }
 
-/// Keeps the Graphics menu check items consistent with the chosen preference.
-fn set_graphics_checks(app: &tauri::AppHandle, pref: settings::GpuPreference) {
+/// Keeps the Graphics menu check items consistent with the chosen mode.
+fn set_graphics_checks(app: &tauri::AppHandle, mode: settings::GraphicsMode) {
     use tauri::menu::MenuItemKind;
     let Some(menu) = app.menu() else {
         return;
@@ -849,12 +1063,17 @@ fn set_graphics_checks(app: &tauri::AppHandle, pref: settings::GpuPreference) {
         return;
     };
     let states = [
-        ("gpu_auto", pref == settings::GpuPreference::Auto),
+        ("gpu_auto", mode == settings::GraphicsMode::Automatic),
+        ("gpu_efficient", mode == settings::GraphicsMode::Efficient),
         (
-            "gpu_integrated",
-            pref == settings::GpuPreference::Integrated,
+            "gpu_performance",
+            mode == settings::GraphicsMode::Performance,
         ),
-        ("gpu_discrete", pref == settings::GpuPreference::Discrete),
+        (
+            "gpu_compatibility",
+            mode == settings::GraphicsMode::Compatibility,
+        ),
+        ("gpu_software", mode == settings::GraphicsMode::Software),
     ];
     for (id, checked) in states {
         if let Some(MenuItemKind::Check(item)) = graphics.get(id) {

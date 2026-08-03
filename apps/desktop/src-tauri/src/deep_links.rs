@@ -159,12 +159,35 @@ pub fn redact_sensitive_url(value: &str) -> String {
     let Ok(mut url) = Url::parse(value) else {
         return value.to_string();
     };
-    let contains_secret = url.query_pairs().any(|(key, _)| {
+    let mut sensitive = false;
+    for (key, _) in url.query_pairs() {
         let key = key.to_ascii_lowercase();
-        key.contains("token") || key == "code" || key.ends_with("_code") || key.contains("secret")
-    });
-    if contains_secret {
+        if key.contains("token")
+            || key == "code"
+            || key.ends_with("_code")
+            || key.contains("secret")
+        {
+            sensitive = true;
+        }
+    }
+    if sensitive {
         url.set_query(Some("redacted"));
+    }
+    // OAuth/SSO flows may deliver tokens in the fragment (#access_token=...);
+    // never leave them in a logged URL.
+    if let Some(fragment) = url.fragment() {
+        let fragment_sensitive =
+            url::form_urlencoded::parse(fragment.as_bytes()).any(|(key, _)| {
+                let key = key.to_ascii_lowercase();
+                key.contains("token")
+                    || key == "code"
+                    || key.ends_with("_code")
+                    || key.contains("secret")
+                    || key.contains("state")
+            });
+        if fragment_sensitive {
+            url.set_fragment(Some("redacted"));
+        }
     }
     url.into()
 }
@@ -249,6 +272,24 @@ mod tests {
         assert_eq!(
             redact_sensitive_url("https://idp.example/callback?code=secret-value&state=ok"),
             "https://idp.example/callback?redacted"
+        );
+    }
+
+    #[test]
+    fn redacts_fragment_tokens_from_logs() {
+        assert_eq!(
+            redact_sensitive_url(
+                "https://app.slack.com/signin#access_token=xoxc-frag&state=AbC123"
+            ),
+            "https://app.slack.com/signin#redacted"
+        );
+    }
+
+    #[test]
+    fn leaves_plain_urls_unchanged() {
+        assert_eq!(
+            redact_sensitive_url("https://slack.com/workspaces"),
+            "https://slack.com/workspaces"
         );
     }
 }

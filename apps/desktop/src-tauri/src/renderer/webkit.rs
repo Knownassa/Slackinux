@@ -13,11 +13,16 @@ static POPUP_ID: AtomicU32 = AtomicU32::new(0);
 pub struct WebKitRenderer {
     window: tauri::WebviewWindow,
     download_dir: std::path::PathBuf,
+    data_dir: std::path::PathBuf,
     bootstrap_url: url::Url,
 }
 
 impl WebKitRenderer {
-    pub fn new(window: tauri::WebviewWindow, download_dir: std::path::PathBuf) -> Self {
+    pub fn new(
+        window: tauri::WebviewWindow,
+        download_dir: std::path::PathBuf,
+        data_dir: std::path::PathBuf,
+    ) -> Self {
         let bootstrap_url = window.url().unwrap_or_else(|_| {
             url::Url::parse("tauri://localhost/bootstrap/index.html")
                 .expect("the static local bootstrap URL is valid")
@@ -26,6 +31,7 @@ impl WebKitRenderer {
         Self {
             window,
             download_dir,
+            data_dir,
             bootstrap_url,
         }
     }
@@ -43,6 +49,8 @@ impl WebKitRenderer {
         update_tooltip: F,
         notif_mgr: Arc<NotificationManager>,
         app_handle: tauri::AppHandle,
+        permission_broker: Arc<crate::permissions::PermissionBroker>,
+        media_activity: Arc<MediaActivity>,
     ) where
         F: Fn(&str) + Send + 'static,
     {
@@ -50,8 +58,8 @@ impl WebKitRenderer {
         self.enable_spellcheck();
         self.setup_navigation_policy(app_handle.clone());
         self.setup_load_recovery();
-        self.setup_permissions();
-        self.setup_crash_recovery();
+        self.setup_permissions(permission_broker, media_activity);
+        self.setup_crash_recovery(app_handle.clone());
         self.setup_notifications(notif_mgr, app_handle);
         self.setup_title_tracking(update_tooltip);
         self.setup_download_handler();
@@ -67,10 +75,13 @@ impl WebKitRenderer {
                 settings.set_enable_webrtc(true);
                 if crate::gpu::software_rendering_enabled() {
                     settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Never);
-                    info!("Rendering: software compositing (Wayland/NVIDIA compatibility)");
+                    info!("Rendering: software compositing (explicit or confirmed fallback)");
                 } else {
                     settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::OnDemand);
                     info!("Rendering: hardware acceleration on demand");
+                }
+                if crate::gpu::dmabuf_disabled() {
+                    info!("Rendering: DMABUF disabled (compatibility mode)");
                 }
                 settings.set_enable_smooth_scrolling(true);
                 info!("WebRTC: enabled via WebKitGTK settings");
@@ -140,6 +151,7 @@ impl WebKitRenderer {
 
     #[cfg(target_os = "linux")]
     fn setup_navigation_policy(&self, app_handle: tauri::AppHandle) {
+        let webkit_data_dir = self.data_dir.join("webkit");
         let _ = self.window.with_webview(move |pw| {
             use webkit2gtk::glib::Cast;
             use webkit2gtk::{
@@ -267,14 +279,25 @@ impl WebKitRenderer {
                                         "popup: {} -> in-app window popup-{id}",
                                         crate::deep_links::redact_sensitive_url(uri.as_str())
                                     );
-                                    let popup = tauri::WebviewWindowBuilder::new(
+                                    // Share the main window's profile-bound
+                                    // WebContext (same data_directory key) so
+                                    // SSO cookies land in the persistent session
+                                    // and survive restarts. If the profile dir is
+                                    // unavailable (fallback mode), build the
+                                    // popup with a fresh context too.
+                                    let popup_builder = tauri::WebviewWindowBuilder::new(
                                         &app_handle,
                                         format!("popup-{id}"),
                                         tauri::WebviewUrl::External(url),
                                     )
                                     .title("Slackinux — Sign in")
-                                    .inner_size(900.0, 720.0)
-                                    .build();
+                                    .inner_size(900.0, 720.0);
+                                    let popup_builder = if webkit_data_dir.exists() {
+                                        popup_builder.data_directory(webkit_data_dir.clone())
+                                    } else {
+                                        popup_builder
+                                    };
+                                    let popup = popup_builder.build();
                                     match popup {
                                         Ok(popup) => {
                                             let main = app_handle.get_webview_window("main");
@@ -363,38 +386,61 @@ impl WebKitRenderer {
     }
 
     #[cfg(target_os = "linux")]
-    fn setup_permissions(&self) {
-        let _ = self.window.with_webview(|pw| {
+    fn setup_permissions(
+        &self,
+        broker: Arc<crate::permissions::PermissionBroker>,
+        activity: Arc<MediaActivity>,
+    ) {
+        self.setup_media_indicators(activity);
+        let _ = self.window.with_webview(move |pw| {
+            use gtk::prelude::*;
             use webkit2gtk::glib::Cast;
             use webkit2gtk::{
                 NotificationPermissionRequest, PermissionRequestExt, UserMediaPermissionRequest,
                 WebViewExt,
             };
             let wk = pw.inner();
-            wk.connect_permission_request(|webview, request| {
+            wk.connect_permission_request(move |webview, request| {
+                let origin = webview
+                    .uri()
+                    .and_then(|value| url::Url::parse(value.as_str()).ok())
+                    .and_then(|url| url.host_str().map(str::to_ascii_lowercase));
+                let Some(host) = origin else {
+                    // No origin means we cannot authorize media access.
+                    request.deny();
+                    warn!("permission request ignored: no origin available");
+                    return true;
+                };
+
                 if request
                     .downcast_ref::<NotificationPermissionRequest>()
                     .is_some()
                 {
-                    request.allow();
-                    info!("notification permission allowed");
+                    let decision =
+                        broker.decide(crate::permissions::MediaKind::Notifications, &host);
+                    apply_decision(
+                        &broker,
+                        crate::permissions::MediaKind::Notifications,
+                        &host,
+                        decision,
+                        request,
+                        webview.toplevel().as_ref(),
+                    );
                     true
                 } else if request
                     .downcast_ref::<UserMediaPermissionRequest>()
                     .is_some()
                 {
-                    let trusted = webview
-                        .uri()
-                        .and_then(|value| url::Url::parse(value.as_str()).ok())
-                        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
-                        .is_some_and(|host| host == "slack.com" || host.ends_with(".slack.com"));
-                    if trusted {
-                        request.allow();
-                        info!("camera/microphone permission allowed for Slack");
-                    } else {
-                        request.deny();
-                        warn!("camera/microphone permission denied for an untrusted origin");
-                    }
+                    let kind = user_media_kind(request);
+                    let decision = broker.decide(kind, &host);
+                    apply_decision(
+                        &broker,
+                        kind,
+                        &host,
+                        decision,
+                        request,
+                        webview.toplevel().as_ref(),
+                    );
                     true
                 } else {
                     info!("permission request: unhandled type");
@@ -405,30 +451,45 @@ impl WebKitRenderer {
     }
 
     #[cfg(target_os = "linux")]
-    fn setup_crash_recovery(&self) {
-        let _ = self.window.with_webview(|pw| {
+    fn setup_crash_recovery(&self, app_handle: tauri::AppHandle) {
+        let data_dir = self.data_dir.clone();
+        let _ = self.window.with_webview(move |pw| {
             use webkit2gtk::{LoadEvent, WebViewExt};
             let wk = pw.inner();
-            let consecutive_crashes = std::rc::Rc::new(std::cell::Cell::new(0_u8));
-            let reset_crashes = consecutive_crashes.clone();
+            let reset_crashes = data_dir.clone();
             wk.connect_load_changed(move |_, event| {
                 if event == LoadEvent::Finished {
-                    reset_crashes.set(0);
+                    // A clean load resets the staged recovery counters so a
+                    // single transient crash does not cascade into fallback
+                    // modes (GPU module keys state by session signature).
+                    crate::gpu::record_success(&reset_crashes);
                 }
             });
             wk.connect_web_process_terminated(move |webview, reason| {
                 use webkit2gtk::WebProcessTerminationReason;
                 match reason {
                     WebProcessTerminationReason::Crashed => {
-                        let attempts = consecutive_crashes.get().saturating_add(1);
-                        consecutive_crashes.set(attempts);
-                        if attempts <= 2 {
-                            warn!("Web process crashed — reload attempt {attempts}/2");
-                            webview.reload();
-                        } else {
-                            warn!(
-                                "Web process crashed repeatedly — stopping automatic reload loop"
-                            );
+                        let stage = crate::gpu::crash_stage();
+                        let data_dir = data_dir.clone();
+                        let ah = app_handle.clone();
+                        match crate::gpu::record_crash(&data_dir) {
+                            crate::gpu::CrashAction::Reload => {
+                                warn!(
+                                    "Web process crashed — reloading (recovery stage {stage} -> 1)"
+                                );
+                                webview.reload();
+                            }
+                            crate::gpu::CrashAction::RetryWithCompatibility => {
+                                warn!("Web process crashed again — reloading with DMABUF disabled");
+                                webview.reload();
+                            }
+                            crate::gpu::CrashAction::OfferSoftware => {
+                                warn!(
+                                    "Web process crashed repeatedly — offering software rendering"
+                                );
+                                offer_software_rendering(&ah, &data_dir);
+                                webview.load_uri("about:blank");
+                            }
                         }
                     }
                     WebProcessTerminationReason::ExceededMemoryLimit => {
@@ -496,6 +557,198 @@ impl WebKitRenderer {
             }
         });
     }
+}
+
+/// Classifies a `UserMediaPermissionRequest` as microphone, camera, or screen
+/// sharing. WebKitGTK 2.34+ reports the display-device flag separately from
+/// the audio/video flags, so screen capture can be brokered on its own.
+#[cfg(target_os = "linux")]
+fn user_media_kind(request: &webkit2gtk::PermissionRequest) -> crate::permissions::MediaKind {
+    use webkit2gtk::glib::translate::ToGlibPtr;
+    use webkit2gtk::glib::Cast;
+    use webkit2gtk::{UserMediaPermissionRequest, UserMediaPermissionRequestExt};
+    if let Some(media) = request.downcast_ref::<UserMediaPermissionRequest>() {
+        // The safe binding only exposes audio/video flags; the display flag
+        // requires the raw symbol (v2_34), which the pinned crate gates behind
+        // the `v2_34` feature enabled in Cargo.toml.
+        let is_display = unsafe {
+            webkit2gtk::ffi::webkit_user_media_permission_is_for_display_device(
+                media.to_glib_none().0,
+            ) != 0
+        };
+        if is_display {
+            return crate::permissions::MediaKind::ScreenShare;
+        }
+        if media.is_for_audio_device() {
+            return crate::permissions::MediaKind::Microphone;
+        }
+        return crate::permissions::MediaKind::Camera;
+    }
+    crate::permissions::MediaKind::Camera
+}
+
+/// Applies a broker decision to a live WebKitGTK permission request, prompting
+/// the user when the broker asks. The decision is recorded before the request
+/// is allowed/denied so subsequent requests honor it.
+#[cfg(target_os = "linux")]
+fn apply_decision(
+    broker: &crate::permissions::PermissionBroker,
+    kind: crate::permissions::MediaKind,
+    host: &str,
+    decision: crate::permissions::PermissionDecision,
+    request: &webkit2gtk::PermissionRequest,
+    parent: Option<&gtk::Widget>,
+) {
+    use webkit2gtk::glib::Cast;
+    use webkit2gtk::PermissionRequestExt;
+
+    let decision = match decision {
+        crate::permissions::PermissionDecision::AskEveryTime => {
+            let parent_window = parent
+                .and_then(|widget| widget.downcast_ref::<gtk::Window>())
+                .cloned();
+            let choice = crate::permissions::prompt_user(kind, host, parent_window.as_ref());
+            broker.record(kind, host, choice);
+            choice
+        }
+        other => other,
+    };
+
+    match decision {
+        crate::permissions::PermissionDecision::AlwaysAllow
+        | crate::permissions::PermissionDecision::AllowOnce => {
+            request.allow();
+            info!("permission allowed: {} for {}", kind.label(), host);
+        }
+        crate::permissions::PermissionDecision::Block
+        | crate::permissions::PermissionDecision::AskEveryTime => {
+            request.deny();
+            warn!(
+                "permission denied: {} for {} ({decision:?})",
+                kind.label(),
+                host
+            );
+        }
+    }
+}
+
+/// Live capture state for the three media sources Slackinux brokers. Updated
+/// from WebKitGTK capture-state notifications so the UI can show an indicator
+/// without polling.
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+pub struct MediaActivity {
+    microphone: std::sync::atomic::AtomicBool,
+    camera: std::sync::atomic::AtomicBool,
+    screen_share: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(target_os = "linux")]
+impl MediaActivity {
+    /// Snapshot of which media sources are currently capturing.
+    pub fn active(&self) -> CaptureActive {
+        CaptureActive {
+            microphone: self.microphone.load(std::sync::atomic::Ordering::Relaxed),
+            camera: self.camera.load(std::sync::atomic::Ordering::Relaxed),
+            screen_share: self.screen_share.load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+}
+
+/// Snapshot returned by [`MediaActivity::active`].
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CaptureActive {
+    pub microphone: bool,
+    pub camera: bool,
+    pub screen_share: bool,
+}
+
+impl CaptureActive {
+    /// `true` when any media source is capturing (e.g. during a Huddle).
+    pub fn any(self) -> bool {
+        self.microphone || self.camera || self.screen_share
+    }
+}
+
+impl WebKitRenderer {
+    /// Enables live capture-state indicators on the main webview. Call before
+    /// the window is shown so the first state change is observed.
+    #[cfg(target_os = "linux")]
+    pub fn setup_media_indicators(&self, activity: Arc<MediaActivity>) {
+        let _ = self.window.with_webview(move |pw| {
+            use webkit2gtk::MediaCaptureState;
+            use webkit2gtk::WebViewExt;
+            let wk = pw.inner();
+            let mic = activity.clone();
+            wk.connect_microphone_capture_state_notify(move |webview| {
+                let capturing = webview.microphone_capture_state() == MediaCaptureState::Active;
+                mic.microphone
+                    .store(capturing, std::sync::atomic::Ordering::Relaxed);
+                info!(
+                    "microphone capture state: {}",
+                    if capturing { "active" } else { "inactive" }
+                );
+            });
+            let cam = activity.clone();
+            wk.connect_camera_capture_state_notify(move |webview| {
+                let capturing = webview.camera_capture_state() == MediaCaptureState::Active;
+                cam.camera
+                    .store(capturing, std::sync::atomic::Ordering::Relaxed);
+                info!(
+                    "camera capture state: {}",
+                    if capturing { "active" } else { "inactive" }
+                );
+            });
+            let screen = activity.clone();
+            wk.connect_display_capture_state_notify(move |webview| {
+                let capturing = webview.display_capture_state() == MediaCaptureState::Active;
+                screen
+                    .screen_share
+                    .store(capturing, std::sync::atomic::Ordering::Relaxed);
+                info!(
+                    "screen capture state: {}",
+                    if capturing { "active" } else { "inactive" }
+                );
+            });
+        });
+    }
+}
+
+/// Shown after repeated web-process crashes: asks the user to confirm software
+/// rendering. Only a confirmed choice persists, so a bad GPU driver cannot
+/// silently degrade the experience; the user always owns the fallback decision.
+#[cfg(target_os = "linux")]
+fn offer_software_rendering(app_handle: &tauri::AppHandle, data_dir: &std::path::Path) {
+    use tauri_plugin_dialog::DialogExt;
+    use tauri_plugin_dialog::MessageDialogButtons;
+    use tauri_plugin_dialog::MessageDialogKind;
+
+    let data_dir = data_dir.to_path_buf();
+    let handle = app_handle.clone();
+    app_handle
+        .dialog()
+        .message(
+            "Slackinux detected repeated rendering failures in the embedded web engine.\n\n\
+             Switch to software rendering? This usually fixes blank or crashing Slack views \
+             on affected graphics drivers.\n\n\
+             You can change this later from the Graphics menu.",
+        )
+        .title("Slackinux — Rendering Problem")
+        .kind(MessageDialogKind::Error)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Switch to Software".into(),
+            "Keep Trying".into(),
+        ))
+        .show(move |confirmed| {
+            if confirmed {
+                info!("software rendering confirmed by the user");
+                crate::gpu::confirm_software(&data_dir);
+                crate::restart_app(&handle);
+            } else {
+                info!("user declined software rendering; keeping the current mode");
+            }
+        });
 }
 
 fn is_https_url(value: &str) -> bool {
@@ -657,6 +910,29 @@ impl SlackRenderer for WebKitRenderer {
         {
             false
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn probe_media_codecs(&self, on_result: Box<dyn FnOnce(Option<String>) + Send + 'static>) {
+        let _ = self.window.with_webview(move |pw| {
+            use javascriptcore::ValueExt;
+            use webkit2gtk::gio::Cancellable;
+            use webkit2gtk::WebViewExt;
+            let script = crate::huddles::codec_probe_script();
+            pw.inner().evaluate_javascript(
+                script,
+                None,
+                None,
+                None::<&Cancellable>,
+                move |result| match result {
+                    Ok(value) => on_result(Some(value.to_str().to_string())),
+                    Err(error) => {
+                        warn!("huddle codec probe failed: {error}");
+                        on_result(None);
+                    }
+                },
+            );
+        });
     }
 }
 
