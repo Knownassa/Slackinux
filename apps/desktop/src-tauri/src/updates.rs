@@ -307,16 +307,21 @@ fn prompt_for_update(
     }
 }
 
-/// Downloads, verifies and installs an update, then restarts the app. Signature
-/// verification is enforced by the updater plugin and cannot be disabled.
+/// Downloads, verifies and installs an update, then asks the user to restart
+/// so the new version takes effect. Signature verification is enforced by the
+/// updater plugin and cannot be disabled.
 fn install_update(app: tauri::AppHandle, update: Update, guard: UpdateLockGuard) {
-    show_info(
-        &app,
-        "The update is downloading. Slackinux will restart once it is installed.",
-        "Updating Slackinux",
-    );
+    let Some(progress) = UpdateProgressDialog::show(&app) else {
+        show_error(
+            &app,
+            "Slackinux Update Failed",
+            "Slackinux could not open the progress window. No files were changed; try again.",
+        );
+        return;
+    };
 
     let progress_app = app.clone();
+    let progress_sender = progress.sender.clone();
     tauri::async_runtime::spawn(async move {
         // Held for the whole install so no second check or download can start.
         let _guard = guard;
@@ -332,16 +337,27 @@ fn install_update(app: tauri::AppHandle, update: Update, guard: UpdateLockGuard)
                         "updates: download {percent}% ({current} of {} bytes)",
                         total.map_or_else(|| "?".into(), |t| t.to_string())
                     );
+                    let _ = progress_sender.send(ProgressMessage::Bytes {
+                        percent,
+                        received: current as u64,
+                        total,
+                    });
                 },
-                || info!("updates: download complete, verifying signature"),
+                || {
+                    info!("updates: download complete, verifying signature");
+                    let _ = progress_sender.send(ProgressMessage::Verifying);
+                },
             )
             .await
             .map_err(|err| UpdateError::Install(err.to_string()));
 
+        // Always dismiss the progress dialog before showing the outcome.
+        let _ = progress_sender.send(ProgressMessage::Done);
+
         match result {
             Ok(()) => {
-                info!("updates: installed; restarting Slackinux");
-                crate::restart_app(&progress_app);
+                info!("updates: installed; asking user to restart to apply");
+                prompt_restart_to_apply(&progress_app);
             }
             Err(UpdateError::Install(message)) => {
                 error!("updates: install failed: {message}");
@@ -359,6 +375,148 @@ fn install_update(app: tauri::AppHandle, update: Update, guard: UpdateLockGuard)
             }
         }
     });
+}
+
+/// The update is installed but the running process is still the old version.
+/// Ask the user to restart now or defer; either way the next launch uses the
+/// new build.
+fn prompt_restart_to_apply(app: &tauri::AppHandle) {
+    let restart_app = app.clone();
+    app.dialog()
+        .message(
+            "The Slackinux update has been installed.\n\nRestart now to start using it. \
+             If you prefer, you can keep working and the new version will apply the \
+             next time Slackinux starts.",
+        )
+        .title("Slackinux Update Ready")
+        .kind(MessageDialogKind::Info)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Restart Now".into(),
+            "Later".into(),
+        ))
+        .show_with_result(move |result| match result {
+            MessageDialogResult::Ok | MessageDialogResult::Custom(_) => {
+                crate::restart_app(&restart_app);
+            }
+            _ => info!("updates: restart deferred; new version applies on next launch"),
+        });
+}
+
+/// Progress events flowing from the download task to the GTK main thread.
+#[derive(Debug, Clone)]
+enum ProgressMessage {
+    /// Download bytes progress.
+    Bytes {
+        percent: u8,
+        received: u64,
+        total: Option<u64>,
+    },
+    /// Download finished; verifying the signature.
+    Verifying,
+    /// Everything is over (success or failure); close the dialog.
+    Done,
+}
+
+/// Computes the progress-bar fraction and human label for a download state.
+/// Kept separate from the dialog so the math is unit-testable.
+fn progress_fraction(percent: u8, received: u64, total: Option<u64>) -> (f64, String) {
+    let fraction = (f64::from(percent) / 100.0).clamp(0.0, 1.0);
+    let label = match total {
+        Some(total) if total > 0 => format!("{percent}% — {received} / {total} bytes"),
+        _ => format!("Downloading… {percent}%"),
+    };
+    (fraction, label)
+}
+
+/// A small GTK progress dialog that shows the update download's progress.
+///
+/// GTK widgets are not thread-safe, and `download_and_install` reports
+/// progress from the async runtime thread. So the dialog hands the download
+/// task a `Sender` and a `glib::idle_add_local` closure drains the channel on
+/// the main loop, updating the bar without ever touching widgets off-thread.
+struct UpdateProgressDialog {
+    dialog: gtk::Dialog,
+    /// Main-thread channel receiver holder so the idle source stays alive.
+    _receiver: std::rc::Rc<std::cell::RefCell<std::sync::mpsc::Receiver<ProgressMessage>>>,
+    sender: std::sync::mpsc::Sender<ProgressMessage>,
+}
+
+impl UpdateProgressDialog {
+    /// Builds the dialog on the main thread and registers an idle source that
+    /// applies incoming progress messages. Returns `None` if the dialog could
+    /// not be created (nothing was installed yet, so it is safe to abort).
+    fn show(_app: &tauri::AppHandle) -> Option<Self> {
+        use gtk::prelude::*;
+
+        let dialog = gtk::Dialog::new();
+        dialog.set_title("Updating Slackinux");
+        dialog.set_modal(true);
+        dialog.set_default_size(360, 120);
+
+        let label = gtk::Label::new(Some("Downloading the update…"));
+        label.set_line_wrap(true);
+        let bar = gtk::ProgressBar::new();
+        bar.set_show_text(true);
+        bar.set_text(Some("Starting…"));
+
+        let content = dialog.content_area();
+        content.set_spacing(12);
+        content.set_margin_top(12);
+        content.set_margin_bottom(12);
+        content.set_margin_start(12);
+        content.set_margin_end(12);
+        content.add(&label);
+        content.add(&bar);
+        dialog.show_all();
+
+        let (sender, receiver) = std::sync::mpsc::channel::<ProgressMessage>();
+        let bar_ui = bar.clone();
+        let label_ui = label.clone();
+        let dialog_ui = dialog.clone();
+        let receiver_ui = std::rc::Rc::new(std::cell::RefCell::new(receiver));
+        let receiver_idle = receiver_ui.clone();
+        gtk::glib::idle_add_local(move || {
+            use gtk::glib::ControlFlow;
+            loop {
+                let message = match receiver_idle.borrow_mut().try_recv() {
+                    Ok(message) => message,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => return ControlFlow::Continue,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => return ControlFlow::Break,
+                };
+                match message {
+                    ProgressMessage::Bytes {
+                        percent,
+                        received,
+                        total,
+                    } => {
+                        let (fraction, label) = progress_fraction(percent, received, total);
+                        bar_ui.set_fraction(fraction);
+                        bar_ui.set_text(Some(&label));
+                    }
+                    ProgressMessage::Verifying => {
+                        label_ui.set_text("Download complete. Verifying the signature…");
+                    }
+                    ProgressMessage::Done => {
+                        dialog_ui.close();
+                        return ControlFlow::Break;
+                    }
+                }
+            }
+        });
+
+        Some(Self {
+            dialog,
+            _receiver: receiver_ui,
+            sender,
+        })
+    }
+}
+
+impl Drop for UpdateProgressDialog {
+    fn drop(&mut self) {
+        use gtk::prelude::*;
+        self.dialog.close();
+    }
 }
 
 /// Opens the GitHub Releases page, used by package-managed and development
@@ -489,5 +647,21 @@ mod tests {
         assert!(message.contains("GitHub did not return the Slackinux update feed"));
         assert!(message.contains("retry now"));
         assert!(!message.contains("first Slackinux release"));
+    }
+
+    #[test]
+    fn progress_fraction_clamps_and_labels_known_total() {
+        let (fraction, label) = progress_fraction(50, 500, Some(1000));
+        assert!((fraction - 0.5).abs() < f64::EPSILON);
+        assert_eq!(label, "50% — 500 / 1000 bytes");
+    }
+
+    #[test]
+    fn progress_fraction_handles_unknown_total() {
+        let (fraction, label) = progress_fraction(0, 42, None);
+        assert_eq!(fraction, 0.0);
+        assert_eq!(label, "Downloading… 0%");
+        let (fraction, _) = progress_fraction(120, 100, Some(100));
+        assert_eq!(fraction, 1.0);
     }
 }
