@@ -9,6 +9,16 @@ All notable changes to Slackinux are documented here.
   titlebar/client-side decoration path.
 - Consolidated sign-in and SSO into Slackinux's isolated, cookie-sharing
   webview and popup flow.
+- Added a native permission broker: camera, microphone, screen sharing, and
+  notifications are never auto-approved. Slackinux asks every time by default
+  and offers allow-once, always-allow, and block choices, restricted to
+  Slack-owned origins; decisions persist and can be reset from the Media menu.
+- Added a Huddle compatibility check (Help → Diagnostics) that classifies the
+  environment — PipeWire session, portal ScreenCast, codecs, and input devices
+  — and an on-demand "Open Huddle in Browser" fallback that launches a full
+  desktop browser using a closed allow-list of known executables.
+- AppImage updates now show live download progress and ask before restarting
+  to apply the new version.
 - Prevented AppImage host-WebKit launches from inheriting incompatible bundled
   GStreamer plugin paths, avoiding another source of blank webviews.
 - Made the per-user installer remove obsolete versioned Slackinux launchers
