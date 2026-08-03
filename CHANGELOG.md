@@ -2,7 +2,7 @@
 
 All notable changes to Slackinux are documented here.
 
-## Unreleased
+## 0.4.0 - 2026-08-03
 
 - Restored dependable edge and corner resizing, compositor shadows, tiling,
   maximization, and rounded window geometry by using GTK's native custom
@@ -25,6 +25,8 @@ All notable changes to Slackinux are documented here.
   that could silently restart an older AppImage.
 - Fixed recovery pages, AppImage-aware restarts, duplicate download naming,
   and exposed visible DND/automatic-update check states in the app menus.
+
+## Unreleased
 
 ## 0.2.5 - 2026-08-02
 
