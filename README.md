@@ -179,6 +179,13 @@ allowed only while the top-level page is on a Slack-owned HTTPS origin. Slack
 does not officially list WebKitGTK as a supported Huddles browser, so audio,
 video, and screen sharing should be treated as experimental.
 
+A CEF (Chromium) renderer backend exists as an **experimental, unverified
+scaffold** (`--renderer=cef`, behind the `cef` cargo feature). It is not the
+default, is not end-to-end tested against a real Huddle session, and requires
+patching the Tauri stack onto the experimental `feat/cef` branch; see
+`apps/desktop/src-tauri/src/renderer/cef.rs` and `Cargo.toml` for the pinned
+recipe. It is not recommended for day-to-day use.
+
 ---
 
 ## Usage

@@ -1,7 +1,7 @@
 {
   "$schema": "./manifest.schema.json",
   "schemaVersion": 1,
-  "updatedAt": "2026-08-02",
+  "updatedAt": "2026-08-08",
   "slack": {
     "minimumChromeMajor": 137,
     "minimumFirefoxMajor": 139,
@@ -14,7 +14,7 @@
       "huddles": "experimental"
     },
     "cef": {
-      "status": "unsupported"
+      "status": "experimental"
     }
   }
 }

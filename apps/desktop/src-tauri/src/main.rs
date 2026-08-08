@@ -94,6 +94,29 @@ fn main() -> AppResult<()> {
     log_webkit_version();
 
     let zoom_level = Arc::new(AtomicU16::new(10));
+
+    // --- Renderer selection ---
+    // Default and recommended backend is WebKitGTK. The CEF backend is an
+    // experimental, unverified opt-in (`--renderer=cef`); see renderer/cef.rs.
+    let args: Vec<String> = env::args().collect();
+    let renderer_is_cef = args.iter().any(|a| a == "--renderer=cef");
+    let use_cef = {
+        #[cfg(feature = "cef")]
+        {
+            renderer_is_cef
+        }
+        #[cfg(not(feature = "cef"))]
+        {
+            false
+        }
+    };
+    if renderer_is_cef && !use_cef {
+        warn!(
+            "renderer: --renderer=cef requires the 'cef' cargo feature; \
+             falling back to WebKitGTK"
+        );
+    }
+
     let zoom_level_menu = zoom_level.clone();
 
     tauri::Builder::default()
@@ -245,12 +268,6 @@ fn main() -> AppResult<()> {
                 .build(app)?;
 
             // --- Renderer ---
-            let renderer = Arc::new(WebKitRenderer::new(
-                window.clone(),
-                download_dir,
-                data_dir.clone(),
-            ));
-
             #[cfg(target_os = "linux")]
             let permission_broker = {
                 let broker = Arc::new(permissions::PermissionBroker::load(&data_dir));
@@ -265,27 +282,52 @@ fn main() -> AppResult<()> {
             let media_activity =
                 Arc::new(renderer::webkit::MediaActivity::default());
 
-            #[cfg(target_os = "linux")]
-            {
-                let tt = tray.clone();
-                let handle = app.handle().clone();
-                let win_title = window.clone();
-                renderer.setup_linux(
-                    move |title| {
-                        let unread = parse_unread_count(title);
-                        if unread > 0 {
-                            let _: Result<(), _> = tt.set_tooltip(Some(format!("Slackinux ({unread})")));
-                        } else {
-                            let _: Result<(), _> = tt.set_tooltip(Some("Slackinux"));
-                        }
-                        let _ = win_title.set_title(title);
-                    },
-                    notif_mgr.clone(),
-                    handle,
-                    permission_broker.clone(),
-                    media_activity.clone(),
+            let renderer: Arc<dyn SlackRenderer> = if use_cef {
+                info!(
+                    "renderer: using experimental CEF backend (not end-to-end verified); \
+                     media/codec features will report unavailable"
                 );
-            }
+                #[cfg(feature = "cef")]
+                {
+                    Arc::new(renderer::cef::CefRenderer::new(window.clone()))
+                }
+                #[cfg(not(feature = "cef"))]
+                {
+                    unreachable!("use_cef is false without the cef feature")
+                }
+            } else {
+                let webkit = Arc::new(WebKitRenderer::new(
+                    window.clone(),
+                    download_dir,
+                    data_dir.clone(),
+                ));
+
+                // WebKitGTK-only wiring (navigation policy, downloads, media
+                // permissions, notifications, title tracking).
+                #[cfg(target_os = "linux")]
+                {
+                    let tt = tray.clone();
+                    let handle = app.handle().clone();
+                    let win_title = window.clone();
+                    webkit.setup_linux(
+                        move |title| {
+                            let unread = parse_unread_count(title);
+                            if unread > 0 {
+                                let _: Result<(), _> = tt.set_tooltip(Some(format!("Slackinux ({unread})")));
+                            } else {
+                                let _: Result<(), _> = tt.set_tooltip(Some("Slackinux"));
+                            }
+                            let _ = win_title.set_title(title);
+                        },
+                        notif_mgr.clone(),
+                        handle,
+                        permission_broker.clone(),
+                        media_activity.clone(),
+                    );
+                }
+
+                webkit
+            };
 
             let handle = app.handle().clone();
             let graphics_mode =

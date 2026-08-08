@@ -8,6 +8,14 @@ license = "MIT"
 repository = "https://github.com/Knownassa/Slackinux"
 homepage = "https://github.com/Knownassa/Slackinux"
 
+[features]
+# Experimental CEF (Chromium Embedded Framework) renderer backend. NOT the
+# default and NOT end-to-end verified. Enabling this only compiles the
+# renderer/cef.rs scaffold; actually running on CEF additionally requires
+# patching the whole tauri stack onto the experimental `feat/cef` branch
+# (see the module docs) and bundling the ~150MB CEF framework.
+cef = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -36,3 +44,15 @@ serde_json = "1"
 # XDG Desktop Portal access for external link/app opening. The tokio feature
 # matches Tauri's async runtime so block_on can drive the portal call.
 ashpd = { version = "0.8", default-features = false, features = ["tokio"] }
+
+# --- Experimental CEF backend: how to actually assemble it (see renderer/cef.rs) ---
+# A `[patch.crates-io]` section is global to the workspace, so it must be
+# applied deliberately and with an exact pinned commit, the same way the
+# webkit2gtk `v2_34` feature above is a documented requirement.
+#
+# Uncomment only to build the CEF backend. The patch replaces the stock tauri
+# stack with the experimental `feat/cef` branch; `cargo build --features cef`
+# then produces a Chromium-backed build.
+#
+# [patch.crates-io]
+# tauri = { git = "https://github.com/tauri-apps/tauri", rev = "4af26a3f7f8b692d62cca549bbacd93f5ce90b41" }

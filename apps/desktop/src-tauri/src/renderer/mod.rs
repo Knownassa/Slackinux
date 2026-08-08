@@ -1,3 +1,5 @@
+#[cfg(feature = "cef")]
+pub mod cef;
 pub mod webkit;
 
 use crate::error::AppResult;
