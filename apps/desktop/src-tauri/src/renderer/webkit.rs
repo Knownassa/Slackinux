@@ -166,6 +166,20 @@ impl WebKitRenderer {
             };
 
             let wk = pw.inner();
+
+            // Slack's client gate only admits desktop Chrome (see
+            // compatibility/manifest.json). WebKitGTK's real UA is not on that
+            // allow-list, so before a main-frame navigation to a Slack-owned
+            // host we mask the UA as desktop Chrome; everywhere else we keep
+            // WebKitGTK's truthful UA. This must happen inside this handler
+            // because WebKitGTK stops signal emission once a decide-policy
+            // callback returns true.
+            let (real_ua, slack_ua) = {
+                use webkit2gtk::SettingsExt;
+                let real_ua = wk.settings().and_then(|s| s.user_agent()).map(String::from);
+                (real_ua, crate::navigation::slack_masked_user_agent())
+            };
+
             let authentication_flow = std::rc::Rc::new(std::cell::Cell::new(false));
             wk.connect_decide_policy(move |webview, decision, decision_type| {
                 match decision_type {
@@ -184,6 +198,29 @@ impl WebKitRenderer {
                         let Some(uri) = resp.request().and_then(|r| r.uri()) else {
                             return false;
                         };
+                        let host = url::Url::parse(uri.as_str())
+                            .ok()
+                            .and_then(|u| u.host_str().map(str::to_string));
+                        if let Some(host) = host {
+                            // Mask as desktop Chrome only for Slack's own hosts.
+                            // Third-party SSO/analytics keep WebKitGTK's real UA.
+                            let masked = crate::navigation::is_slack_owned_host(&host);
+                            if let Some(settings) = webview.settings() {
+                                use webkit2gtk::SettingsExt;
+                                let target = if masked {
+                                    Some(slack_ua.as_str())
+                                } else {
+                                    real_ua.as_deref()
+                                };
+                                if target != settings.user_agent().as_deref() {
+                                    settings.set_user_agent(target);
+                                    info!(
+                                        "UA: {} Chrome mask for {host}",
+                                        if masked { "applied" } else { "removed" }
+                                    );
+                                }
+                            }
+                        }
                         if webview
                             .uri()
                             .is_some_and(|current| is_slack_auth_page(current.as_str()))
