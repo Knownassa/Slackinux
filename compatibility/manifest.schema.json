@@ -35,6 +35,14 @@
           }
         }
       }
+    },
+    "architectures": {
+      "type": "object",
+      "properties": {
+        "x86_64": { "type": "string", "enum": ["supported", "experimental", "unsupported"] },
+        "aarch64": { "type": "string", "enum": ["supported", "experimental", "unsupported"] },
+        "musl": { "type": "string", "enum": ["supported", "experimental", "unsupported"] }
+      }
     }
   }
 }

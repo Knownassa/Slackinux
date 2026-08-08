@@ -51,14 +51,23 @@ pub fn prefer_host_webkit_for_appimage() {
 
 #[cfg(target_os = "linux")]
 fn host_dynamic_loader() -> Option<&'static str> {
-    const LOADERS: &[&str] = &[
-        "/lib64/ld-linux-x86-64.so.2",
-        "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
-        "/usr/lib64/ld-linux-x86-64.so.2",
-        "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
-    ];
+    let loaders: &[&str] = if std::env::consts::ARCH == "aarch64" {
+        &[
+            "/lib64/ld-linux-aarch64.so.1",
+            "/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1",
+            "/usr/lib64/ld-linux-aarch64.so.1",
+            "/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1",
+        ]
+    } else {
+        &[
+            "/lib64/ld-linux-x86-64.so.2",
+            "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+            "/usr/lib64/ld-linux-x86-64.so.2",
+            "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+        ]
+    };
 
-    LOADERS
+    loaders
         .iter()
         .copied()
         .find(|loader| std::path::Path::new(loader).is_file())
@@ -104,14 +113,23 @@ fn bundled_runtime_variables() -> &'static [&'static str] {
 #[cfg(target_os = "linux")]
 fn host_webkit_available() -> bool {
     const LIBRARY: &str = "libwebkit2gtk-4.1.so.0";
-    const LIBRARY_DIRS: &[&str] = &[
-        "/usr/lib",
-        "/usr/lib64",
-        "/usr/lib/x86_64-linux-gnu",
-        "/lib/x86_64-linux-gnu",
-    ];
+    let library_dirs: &[&str] = if std::env::consts::ARCH == "aarch64" {
+        &[
+            "/usr/lib",
+            "/usr/lib64",
+            "/usr/lib/aarch64-linux-gnu",
+            "/lib/aarch64-linux-gnu",
+        ]
+    } else {
+        &[
+            "/usr/lib",
+            "/usr/lib64",
+            "/usr/lib/x86_64-linux-gnu",
+            "/lib/x86_64-linux-gnu",
+        ]
+    };
 
-    LIBRARY_DIRS
+    library_dirs
         .iter()
         .any(|directory| std::path::Path::new(directory).join(LIBRARY).is_file())
         || std::process::Command::new("ldconfig")
@@ -137,5 +155,13 @@ mod tests {
     #[test]
     fn host_loader_is_available_on_supported_linux_build_hosts() {
         assert!(host_dynamic_loader().is_some());
+    }
+
+    #[test]
+    fn aarch64_loader_path_is_considered_for_arm_builds() {
+        assert!(match std::env::consts::ARCH {
+            "aarch64" => host_dynamic_loader().is_some_and(|loader| loader.contains("aarch64")),
+            _ => host_dynamic_loader().is_some_and(|loader| loader.contains("x86-64")),
+        });
     }
 }

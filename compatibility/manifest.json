@@ -16,5 +16,10 @@
     "cef": {
       "status": "experimental"
     }
+  },
+  "architectures": {
+    "x86_64": "supported",
+    "aarch64": "experimental",
+    "musl": "unsupported"
   }
 }

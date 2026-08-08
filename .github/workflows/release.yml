@@ -11,7 +11,17 @@ permissions:
 
 jobs:
   publish:
-    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            arch: x86_64
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v7
@@ -40,6 +50,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: ${{ matrix.target }}
 
       - name: Cache Rust build
         uses: swatinem/rust-cache@v2
@@ -85,12 +96,32 @@ jobs:
             or the AppImage for other Linux distributions. A POSIX shell installer is
             also available from the repository README.
 
+            x86-64 and aarch64 builds are published for each release. Choose the
+            package matching your architecture; the in-app updater selects it
+            automatically.
+
             Existing updater-enabled installations will be notified automatically.
           releaseDraft: true
           prerelease: false
-          args: "--bundles appimage,deb,rpm"
+          args: "--target ${{ matrix.target }} --bundles appimage,deb,rpm"
           uploadUpdaterJson: true
           uploadUpdaterSignatures: true
+
+  # After every architecture's installers are published, build the shared
+  # SHA-256 checksums and the updater manifest. Running these once here (rather
+  # than in the matrix) avoids the last-published platform clobbering the
+  # previous platform's artifacts.
+  finalize:
+    needs: publish
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve release tag
+        shell: bash
+        run: |
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' apps/desktop/src-tauri/Cargo.toml | head -1)"
+          echo "RELEASE_TAG=v$version" >> "$GITHUB_ENV"
 
       - name: Publish SHA-256 checksums
         env:
