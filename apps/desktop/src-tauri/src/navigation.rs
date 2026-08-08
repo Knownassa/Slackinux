@@ -7,6 +7,34 @@ pub enum NavigationDecision {
     Deny,
 }
 
+/// True when `host` is owned by Slack (app.slack.com, any *.slack.com
+/// workspace host, or the root/`www` marketing hosts). Used to scope behavior
+/// such as the Slack-masked user agent to Slack's own pages only.
+pub fn is_slack_owned_host(host: &str) -> bool {
+    let host_lower = host.to_lowercase();
+    host_lower == "app.slack.com"
+        || host_lower.ends_with(".slack.com")
+        || host_lower == "slack.com"
+        || host_lower == "www.slack.com"
+}
+
+/// The desktop Chrome user agent Slackinux reports when navigating to
+/// Slack-owned pages. Slack's Huddle client gate only admits desktop Chrome
+/// (compatibility/manifest.json: minimumChromeMajor), so WebKitGTK's truthful
+/// UA would be rejected outright even when the media stack is fully ready.
+///
+/// The version tracks `minimumChromeMajor` from the compatibility manifest.
+/// Keep the two in sync; do not bump past a released Chrome major without a
+/// matching manifest update, and never apply this mask to third-party hosts.
+pub fn slack_masked_user_agent() -> String {
+    // Firefox-parity reasoning: Slack admitted Firefox after it shipped its own
+    // UA workaround; masking WebKitGTK as desktop Chrome is the same class of
+    // fix. Chrome 137 is the current floor from the compatibility manifest.
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+     Chrome/137.0.0.0 Safari/537.36"
+        .to_string()
+}
+
 pub fn classify_url(url: &Url) -> NavigationDecision {
     if url.scheme() == "tauri" {
         return if matches!(url.host_str(), Some("localhost" | "tauri.localhost")) {
@@ -36,11 +64,7 @@ pub fn classify_url(url: &Url) -> NavigationDecision {
         return NavigationDecision::AllowInternal;
     }
 
-    let is_slack = host_lower == "app.slack.com"
-        || host_lower.ends_with(".slack.com")
-        || host_lower == "slack.com"
-        || host_lower == "www.slack.com";
-    if is_slack {
+    if is_slack_owned_host(host) {
         return if url.scheme() == "https" {
             NavigationDecision::AllowInternal
         } else {
@@ -64,6 +88,32 @@ mod tests {
     fn allows_app_slack_com() {
         let url = Url::parse("https://app.slack.com/client/T00/B00").unwrap();
         assert_eq!(classify_url(&url), NavigationDecision::AllowInternal);
+    }
+
+    #[test]
+    fn slack_host_helper_matches_only_slack_owned_hosts() {
+        assert!(is_slack_owned_host("app.slack.com"));
+        assert!(is_slack_owned_host("myworkspace.slack.com"));
+        assert!(is_slack_owned_host("slack.com"));
+        assert!(is_slack_owned_host("www.slack.com"));
+        assert!(!is_slack_owned_host("evilslack.com"));
+        assert!(!is_slack_owned_host("slack.com.evil.example"));
+        assert!(!is_slack_owned_host("accounts.google.com"));
+        assert!(!is_slack_owned_host("example.com"));
+    }
+
+    #[test]
+    fn slack_ua_mask_reports_desktop_chrome() {
+        let ua = slack_masked_user_agent();
+        assert!(
+            ua.contains("Chrome/137."),
+            "UA must report desktop Chrome >= 137: {ua}"
+        );
+        assert!(
+            ua.contains("X11; Linux"),
+            "UA must look like a Linux desktop browser: {ua}"
+        );
+        assert!(ua.contains("AppleWebKit/537.36"));
     }
 
     #[test]

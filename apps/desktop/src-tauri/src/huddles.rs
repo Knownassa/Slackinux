@@ -415,6 +415,30 @@ mod tests {
     }
 
     #[test]
+    fn ua_mask_cannot_hide_a_broken_environment() {
+        // The Slack-scoped Chrome UA mask only flips media_api_exposed back to
+        // true once Slack admits the page; it must never let a genuinely
+        // unready environment classify as Supported.
+        let mut report = supported_report();
+        report.pipewire_connected = false;
+        report.screencast_portal = false;
+        assert_eq!(report.classify(), HuddleSupport::MissingPortal);
+
+        let mut report = supported_report();
+        report.audio_device = false;
+        report.video_device = false;
+        report.codecs = Some(CodecSet {
+            opus: true,
+            vp8: false,
+            vp9: false,
+            h264: false,
+            av1: false,
+        });
+        assert_eq!(report.classify(), HuddleSupport::MissingCodecs);
+        assert_ne!(report.classify(), HuddleSupport::Supported);
+    }
+
+    #[test]
     fn no_webrtc_is_unsupported_by_renderer() {
         let mut report = supported_report();
         report.webrtc_available = false;
