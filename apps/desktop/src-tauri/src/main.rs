@@ -4,8 +4,6 @@ mod deep_links;
 mod diagnostics;
 mod error;
 #[cfg(target_os = "linux")]
-mod frame;
-#[cfg(target_os = "linux")]
 mod gpu;
 #[cfg(target_os = "linux")]
 mod huddle_browser;
@@ -15,9 +13,11 @@ mod navigation;
 mod notifications;
 #[cfg(target_os = "linux")]
 mod permissions;
+mod portal;
 mod renderer;
 mod runtime;
 mod settings;
+mod theme;
 mod updates;
 
 use std::env;
@@ -560,11 +560,6 @@ fn main() -> AppResult<()> {
                 menu.append(&account_menu)?;
             }
 
-            // The custom frame runs after the app menu is set so the menubar is
-            // already attached and can be reparented without polling.
-            #[cfg(target_os = "linux")]
-            frame::apply_custom_frame(app.handle(), &window, theme_preference.clone());
-
             // --- Close to tray ---
             let window_clone = window.clone();
             window.on_window_event(move |event| {
@@ -671,7 +666,7 @@ fn main() -> AppResult<()> {
                 }
                 "release_notes" => {
                     if let Err(err) =
-                        open::that_detached("https://github.com/Knownassa/Slackinux/releases")
+                        crate::portal::open_uri("https://github.com/Knownassa/Slackinux/releases")
                     {
                         error!("failed to open release notes: {err}");
                     }
@@ -797,7 +792,7 @@ fn main() -> AppResult<()> {
                     set_theme_checks(app, preference);
                     if let Some(window) = app.get_webview_window("main") {
                         #[cfg(target_os = "linux")]
-                        frame::set_theme(&window, preference);
+                        theme::set_theme(&window, preference);
                     }
                     info!("theme preference: {preference}");
                 }
