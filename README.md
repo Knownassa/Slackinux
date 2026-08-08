@@ -158,12 +158,14 @@ Artifacts land in `target/release/bundle/`. On Arch-based distros set
 
 ## Compatibility
 
-Slackinux currently publishes x86-64 Linux packages and requires glibc 2.34 or
-newer. Ubuntu 22.04/24.04 and Debian 12+ are the primary supported targets.
-Fedora, RHEL 9+, openSUSE, Arch, CachyOS, Manjaro, and EndeavourOS are supported
-through the RPM or AppImage paths but receive less CI coverage. Alpine/musl,
-32-bit Linux, ARM/aarch64, Windows, macOS, and mobile devices are not currently
-supported.
+Slackinux publishes x86-64 and aarch64 (ARM64) Linux packages and requires
+glibc 2.34 or newer. Ubuntu 22.04/24.04 and Debian 12+ are the primary
+supported targets, on both architectures. Fedora, RHEL 9+, openSUSE, Arch,
+CachyOS, Manjaro, and EndeavourOS are supported through the RPM or AppImage
+paths but receive less CI coverage. 32-bit Linux, Windows, macOS, and mobile
+devices are not supported. Alpine/musl builds are not provided: the bundled
+renderer links the system WebKitGTK and GTK3 libraries, which are built
+against glibc and have no musl-compatible variants.
 
 The AppImage prefers a host `libwebkit2gtk-4.1.so.0` when present, which keeps
 the browser engine aligned with distribution security updates and avoids mixed
@@ -272,6 +274,7 @@ apps/desktop/
 │       ├── main.rs            # shell: window, tray, menu, shortcuts, settings
 │       ├── renderer/mod.rs    # SlackRenderer trait (renderer-agnostic shell)
 │       ├── renderer/webkit.rs # WebKitGTK implementation of SlackRenderer
+│       ├── renderer/cef.rs    # experimental CEF scaffold (opt-in, unverified)
 │       ├── navigation.rs      # URL classification engine (allow/deny/open)
 │       ├── notifications.rs   # native notifications, DND, click-to-focus
 │       ├── diagnostics.rs     # rotating logs and privacy-safe bug reports
