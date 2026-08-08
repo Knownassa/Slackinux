@@ -29,9 +29,12 @@ pub fn is_slack_owned_host(host: &str) -> bool {
 pub fn slack_masked_user_agent() -> String {
     // Firefox-parity reasoning: Slack admitted Firefox after it shipped its own
     // UA workaround; masking WebKitGTK as desktop Chrome is the same class of
-    // fix. Chrome 137 is the current floor from the compatibility manifest.
+    // fix. Chrome 151 is the current stable major (Aug 2026), matching the
+    // compatibility manifest. Slack's browser lifecycle drops Chrome <= 142 on
+    // November 9, 2026, so keep this at or above current stable and bump both
+    // together as Slack's floor moves.
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
-     Chrome/137.0.0.0 Safari/537.36"
+     Chrome/151.0.0.0 Safari/537.36"
         .to_string()
 }
 
@@ -106,8 +109,8 @@ mod tests {
     fn slack_ua_mask_reports_desktop_chrome() {
         let ua = slack_masked_user_agent();
         assert!(
-            ua.contains("Chrome/137."),
-            "UA must report desktop Chrome >= 137: {ua}"
+            ua.contains("Chrome/151."),
+            "UA must report current stable desktop Chrome (151): {ua}"
         );
         assert!(
             ua.contains("X11; Linux"),

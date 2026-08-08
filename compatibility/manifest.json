@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "updatedAt": "2026-08-08",
   "slack": {
-    "minimumChromeMajor": 137,
+    "minimumChromeMajor": 151,
     "minimumFirefoxMajor": 139,
     "huddleBrowsers": ["Chrome", "Firefox"]
   },

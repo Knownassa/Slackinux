@@ -53,7 +53,8 @@ Slack app.
 
 - `navigation.rs` gains `is_slack_owned_host()` (slack.com plus owned domains)
   and `slack_masked_user_agent()` returning the desktop Chrome UA string
-  (`Chrome/137.0.0.0`, matching the manifest's `slack.minimumChromeMajor`).
+  (`Chrome/151.0.0.0`, the current stable major and matching the manifest's
+  `slack.minimumChromeMajor`).
 - `renderer/webkit.rs` `setup_navigation_policy` captures the real UA and the
   masked UA at startup and, inside the decide-policy handler, sets
   `settings.set_user_agent` per main-frame host. WebKitGTK stops signal
