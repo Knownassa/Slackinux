@@ -533,16 +533,32 @@ impl WebKitRenderer {
     #[cfg(target_os = "linux")]
     fn setup_download_handler(&self) {
         let dd = self.download_dir.clone();
+        // Paths already handed out this session. `unique_download_path` checks
+        // the filesystem, but WebKit materializes the destination file
+        // asynchronously, so a burst of same-named downloads decided in one
+        // main-loop iteration would otherwise all see the base name as free.
+        // Reserving in memory closes that window within a single session.
+        let reserved = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
         let _ = self.window.with_webview(move |pw| {
             use webkit2gtk::{DownloadExt, WebContextExt, WebViewExt};
             let wk = pw.inner();
             if let Some(ctx) = wk.context() {
                 ctx.connect_download_started(move |_ctx, download| {
                     let destination_directory = dd.clone();
+                    let reserved = reserved.clone();
                     download.connect_decide_destination(move |download, suggested_filename| {
                         let name = safe_download_name(suggested_filename);
-                        let destination =
-                            unique_download_path(&destination_directory, name.as_str());
+                        let destination = {
+                            let mut reserved = match reserved.lock() {
+                                Ok(guard) => guard,
+                                Err(poisoned) => poisoned.into_inner(),
+                            };
+                            unique_download_path(
+                                &destination_directory,
+                                name.as_str(),
+                                &mut reserved,
+                            )
+                        };
                         let Ok(destination_uri) = url::Url::from_file_path(&destination) else {
                             warn!("download blocked: invalid destination path");
                             return false;
@@ -806,9 +822,15 @@ fn safe_download_name(suggested: &str) -> String {
     }
 }
 
-fn unique_download_path(directory: &std::path::Path, name: &str) -> std::path::PathBuf {
+fn unique_download_path(
+    directory: &std::path::Path,
+    name: &str,
+    reserved: &mut std::collections::HashSet<std::path::PathBuf>,
+) -> std::path::PathBuf {
     let original = directory.join(name);
-    if !original.exists() {
+    let taken = |path: &std::path::Path| path.exists() || reserved.contains(path);
+    if !taken(&original) {
+        reserved.insert(original.clone());
         return original;
     }
 
@@ -824,11 +846,14 @@ fn unique_download_path(directory: &std::path::Path, name: &str) -> std::path::P
             None => format!("{stem} ({index})"),
         };
         let candidate = directory.join(candidate_name);
-        if !candidate.exists() {
+        if !taken(&candidate) {
+            reserved.insert(candidate.clone());
             return candidate;
         }
     }
-    directory.join(format!("download-{}", std::process::id()))
+    let fallback = directory.join(format!("download-{}", std::process::id()));
+    reserved.insert(fallback.clone());
+    fallback
 }
 
 impl SlackRenderer for WebKitRenderer {
@@ -963,10 +988,45 @@ mod download_tests {
             std::env::temp_dir().join(format!("slackinux-download-test-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("report.pdf"), b"existing").unwrap();
+        let mut reserved = std::collections::HashSet::new();
         assert_eq!(
-            unique_download_path(&directory, "report.pdf"),
+            unique_download_path(&directory, "report.pdf", &mut reserved),
             directory.join("report (1).pdf")
         );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn burst_of_same_named_downloads_never_share_a_path() {
+        let directory =
+            std::env::temp_dir().join(format!("slackinux-download-burst-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut reserved = std::collections::HashSet::new();
+        let mut paths = std::collections::HashSet::new();
+        for _ in 0..50 {
+            let path = unique_download_path(&directory, "report.pdf", &mut reserved);
+            assert!(
+                paths.insert(path.clone()),
+                "duplicate download path {path:?}"
+            );
+        }
+        assert_eq!(paths.len(), 50);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn reserved_paths_still_skipped_after_files_removed() {
+        let directory = std::env::temp_dir().join(format!(
+            "slackinux-download-reserved-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut reserved = std::collections::HashSet::new();
+        let first = unique_download_path(&directory, "report.pdf", &mut reserved);
+        std::fs::write(&first, b"data").unwrap();
+        std::fs::remove_file(&first).unwrap();
+        let second = unique_download_path(&directory, "report.pdf", &mut reserved);
+        assert_ne!(first, second);
         let _ = std::fs::remove_dir_all(directory);
     }
 }

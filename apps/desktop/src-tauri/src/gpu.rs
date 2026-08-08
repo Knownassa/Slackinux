@@ -888,4 +888,38 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn fallback_store_is_written_atomically() {
+        let dir = std::env::temp_dir().join(format!("slackinux-gpu-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // First write lands; the intermediate temp file must be gone afterwards.
+        record_crash(&dir);
+        let path = fallback_store_path(&dir);
+        assert!(
+            path.exists(),
+            "fallback store must exist after a crash record"
+        );
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "temp file must be renamed away after a successful write"
+        );
+
+        // A stale temp file left by a mid-write crash must not corrupt the
+        // real store, and a corrupt final file must degrade to defaults
+        // instead of crashing.
+        std::fs::write(path.with_extension("json.tmp"), b"partial garbage").unwrap();
+        let store = load_fallback_store(&path);
+        assert_eq!(store.signatures.len(), 1, "stale temp must be ignored");
+        std::fs::write(&path, b"not json").unwrap();
+        let store = load_fallback_store(&path);
+        assert!(
+            store.signatures.is_empty(),
+            "corrupt store must load as default"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
