@@ -100,7 +100,7 @@ pub fn copy_support_report(app: &tauri::AppHandle) {
 
 pub fn report_issue(app: &tauri::AppHandle) {
     let url = issue_url(&support_report(app));
-    if let Err(err) = open::that_detached(url.as_str()) {
+    if let Err(err) = crate::portal::open_uri(url.as_str()) {
         error!("could not open the Slackinux issue reporter: {err}");
         app.dialog()
             .message(format!(

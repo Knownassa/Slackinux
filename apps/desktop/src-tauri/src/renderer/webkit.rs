@@ -219,7 +219,7 @@ impl WebKitRenderer {
                                     "navigation: {} -> OpenExternally",
                                     crate::deep_links::redact_sensitive_url(uri.as_str())
                                 );
-                                let _ = open::that_detached(uri.as_str());
+                                let _ = crate::portal::open_uri(uri.as_str());
                                 decision.ignore();
                                 true
                             }
@@ -269,7 +269,7 @@ impl WebKitRenderer {
                                         "popup: {} -> OpenExternally",
                                         crate::deep_links::redact_sensitive_url(uri.as_str())
                                     );
-                                    let _ = open::that_detached(uri.as_str());
+                                    let _ = crate::portal::open_uri(uri.as_str());
                                     decision.ignore();
                                     return true;
                                 }
@@ -340,7 +340,7 @@ impl WebKitRenderer {
                             }
                             "mailto" | "tel" => {
                                 info!("popup: {uri} -> OpenExternally");
-                                let _ = open::that_detached(uri.as_str());
+                                let _ = crate::portal::open_uri(uri.as_str());
                             }
                             _ => {
                                 info!("popup: {uri} -> blocked");

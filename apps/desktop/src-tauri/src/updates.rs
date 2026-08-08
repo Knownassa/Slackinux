@@ -522,7 +522,7 @@ impl Drop for UpdateProgressDialog {
 /// Opens the GitHub Releases page, used by package-managed and development
 /// builds that cannot replace their own files.
 fn open_release_page(app: &tauri::AppHandle) {
-    if let Err(err) = open::that_detached(RELEASES_URL) {
+    if let Err(err) = crate::portal::open_uri(RELEASES_URL) {
         error!("updates: could not open release page: {err}");
         show_error(
             app,

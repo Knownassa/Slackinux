@@ -33,3 +33,6 @@ webkit2gtk = { version = "2.0", features = ["v2_34"] }
 javascriptcore-rs = "1.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# XDG Desktop Portal access for external link/app opening. The tokio feature
+# matches Tauri's async runtime so block_on can drive the portal call.
+ashpd = { version = "0.8", default-features = false, features = ["tokio"] }
